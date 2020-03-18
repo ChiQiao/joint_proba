@@ -1,0 +1,82 @@
+{
+    "burr12": [
+        {
+            "floc": 0
+        }
+    ],
+    "expon": [
+        {
+            "floc": 0
+        }
+    ], 
+    "fatiguelife": [
+        {
+            "floc": 0
+        }
+    ], 
+    "gamma": [
+        {
+            "floc": 0
+        }
+    ], 
+    "genextreme": 
+    [
+        {
+            
+        }
+    ], 
+    "genpareto": 
+    [
+        {
+            
+        }
+    ], 
+    "gumbel_r":
+    [
+        {
+            
+        }
+    ], 
+    "invgauss":
+    [
+        {
+            "floc": 0
+        }
+    ], 
+    "logistic":
+    [
+        {
+            
+        }
+    ], 
+    "lognorm":
+    [
+        {
+            "fscale": 1
+        }
+    ], 
+    "nakagami":
+    [
+        {
+            "floc": 0
+        }
+    ], 
+    "norm":
+    [
+        {
+            
+        }
+    ], 
+    "rayleigh":
+    [
+        {
+            "floc": 0
+        }
+    ], 
+    "weibull_min":
+    [
+        {
+            "floc": 0
+        }
+    ]
+}

@@ -1,5 +1,6 @@
 import calendar
 import copy
+import json
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,6 +11,7 @@ from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 from sklearn import linear_model
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score
 
 class Univariate:
     ''' Univariate random variable object with accurate tail extrapolation 
@@ -221,7 +223,9 @@ class Univariate:
             ----------------
                 self.bulk_F: CDF corresponding to self.sample_coor
         '''
-        fit_df, ss = Univariate.best_fit(self.data)
+        ss = StandardScaler().fit(self.data.reshape(-1, 1))
+        data_std = ss.transform(self.data.reshape(-1, 1)).flatten()
+        fit_df = Univariate.best_fit(data_std)
         self.bulk_F = getattr(stats, fit_df.Distribution[0]).cdf(
             ss.transform(self.sample_coor.reshape(-1, 1)), 
             *fit_df.param[0][:-2], 
@@ -231,68 +235,70 @@ class Univariate:
             print(f'          Best fit distribution: {fit_df.Distribution[0]}')
 
     @staticmethod
-    def best_fit(data, dist_names=None, qq_plot=False):
+    def best_fit(data, dist_names=None, qq_plot=False, dist_config={}):
         ''' Search for best distribution fitting based on chi-squar test
             List for scipy distribution: 
-                https://docs.scipy.org/doc/scipy/reference/stats.html 
+                https://docs.scipy.org/doc/scipy/reference/stats.html
             Regarding chi-squre test:
                 https://www.itl.nist.gov/div898/handbook/eda/section3/eda35f.htm
         '''
         warnings.filterwarnings("ignore")
         if dist_names is None:
-            dist_names = [
-                'beta', 'burr', 'expon', 'exponweib', 
-                'genextreme', 'gamma', 'gumbel_r', 'gumbel_l', 
-                'logistic', 'lognorm', 'nakagami', 'norm',
-                'rayleigh', 't', 'weibull_min', 'weibull_max'
-            ]
-
-        # Standardize data
-        data = data.reshape(-1, 1)
-        ss = StandardScaler().fit(data)
-        data_std = ss.transform(data)
+            dist_names= [
+                'expon', 'gumbel_l', 'gumbel_r', 'logistic', 'norm', 'rayleigh', # 2 para
+                'exponnorm', 'fatiguelife', 'gamma', 'genextreme', 'genlogistic', # 3 para
+                'invgamma', 'invgauss', 'lognorm', 'nakagami', # 3 para
+                'genpareto', 't', 'weibull_max', 'weibull_min', # 3 para
+                'exponweib', 'beta', 'burr', # 4 para
+            ] # 20 common distributions
 
         # Prepare observation data for the chi-square test
         number_of_bins = 20
-        observed_values, bin_edges = np.histogram(data_std, bins=number_of_bins)
+        observed_values, bin_edges = np.histogram(data, bins=number_of_bins)
 
-        chi_square, p_values, params = [], [], []
+        # Prepare quantile for the customized method to calculate R2 from Q-Q plot
+        val_true = np.linspace(data.min(), data.max(), 200)[1:-1] # Skip end to avoid inf
+        quantile = [(data <= val).sum() / len(data) for val in val_true]    
+
+        chi_square, r2, params = [], [], []
         for dist_name in dist_names:
             # Fit distribution
             dist = getattr(stats, dist_name)
-            param = dist.fit(data_std)
+            param = dist.fit(data, **dist_config.get(dist_name, [{}])[0])
             params.append(param)
-
-            # Obtain the KS test P statistic
-            p_values.append(stats.kstest(data_std.T, dist_name, args=param)[1])    
-
+            
             # calculate chi-squared
             cdf = dist.cdf(bin_edges, *param[:-2], loc=param[-2], scale=param[-1])
-            expected_values = len(data_std) * np.diff(cdf)
+            expected_values = len(data) * np.diff(cdf)
             chi_square.append(
                 stats.chisquare(observed_values, expected_values, ddof=len(param)-2)[0]
             ) # loc and scale not included
+
+            # Customized way to quickly calculate R2 from Q-Q plot
+            val_pred = dist.ppf(quantile, *param[:-2], loc=param[-2], scale=param[-1])
+            r2.append(r2_score(val_true, val_pred))
 
         # Collate results and sort by goodness of fit (best at top)
         fit_df = pd.DataFrame({
             'Distribution': dist_names,
             'chi_square': chi_square,
-            'p_value': np.round(p_values, 5),
+            'r2': r2,
             'param': params,
         })
-        fit_df = fit_df.sort_values(['chi_square']).reset_index(drop=True)
+        fit_df = fit_df.sort_values(['r2'], ascending=False).reset_index(drop=True)
+        # fit_df = fit_df.sort_values(['chi_square'], ascending=True).reset_index(drop=True)
 
         if qq_plot:
             plt.figure(figsize=(16, 8))
             for idx in range(min(7, len(fit_df))):
                 plt.subplot(2,4,idx+1)
                 stats.probplot(
-                    data_std.flatten(), sparams=fit_df.param[idx], 
+                    data, sparams=fit_df.param[idx], 
                     dist=fit_df.Distribution[idx], plot=plt)
                 plt.title(fit_df.Distribution[idx])
                 plt.tight_layout()
             plt.show()
-        return fit_df, ss
+        return fit_df
     
     @staticmethod
     def _plotting_position(data, method='unbiased'):
