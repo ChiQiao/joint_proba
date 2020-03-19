@@ -6,12 +6,202 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import warnings
+from functools import partial
 from scipy import stats
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 from sklearn import linear_model
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
+
+class Multivariate:
+    def __init__(self, df, col_x=0, col_y=1, condY_x=None):
+        self.x = df.iloc[:, col_x]
+        self.y = df.iloc[:, col_y]
+        if condY_x is None:
+            self.condY_x = np.linspace(x.min(), x.max(), 10)
+        else:
+            self.condY_x = condY_x
+        self.condY_dx = np.diff(condY_x).mean()
+        
+
+    def fit(self, plot_diagnosis=True, verbose=True):
+        ''' Fit results that are independent from MRP 
+            Variables added:
+            ----------------
+                self.x_pd, y_pd, condY_pd: Univariate objects for marginal X & Y, 
+                    and conditional Y
+                self.condYs_bulk: list of _CondY object as candidates of condY fitting
+                    results using the bulk of the data
+        '''
+
+        def get_condY_para_bulk():
+            ''' Fit distribution for condY at various x 
+                Returns:
+                --------
+                    df: Dataframe of different distributions with averaged chi_square, 
+                        averaged r2, and parameters for the corresponding x.
+                Notes:
+                ------
+                    Only distributions with chi_square lower than 2 * optimal result 
+                        are returned
+            '''
+            df_temp = pd.DataFrame()
+            for condY_pd in self.condY_pd:
+                data = condY_pd.data
+                df_cur = Univariate.best_fit(
+                    data, dist_names=dist_names, dist_config=dist_config)
+                df_temp = pd.concat([df_temp, df_cur.set_index('Distribution')], axis=1)
+
+            # Arrange condY fitting results
+            # chi_square, r2: mean
+            # param: stack for different condY_x
+            df = pd.concat(
+                [
+                    df_temp['chi_square'].mean(axis=1, skipna=False),
+                    df_temp['r2'].mean(axis=1, skipna=False),
+                    df_temp['param'].apply(np.vstack, axis=1),
+                ], axis=1
+            ).rename(
+                columns={0:'chi_square', 1:'r2', 2:'param'}
+            ).sort_values(by='chi_square')
+
+            # Select candidates based on chi_square
+            df = df[df['chi_square'] < df['chi_square'][0] * 2]
+            return df
+
+        total_steps = 5
+
+        # Distributions for re-parameterization and their configs
+        dist_names = np.array([
+            'burr12', 'expon', 'fatiguelife', 'gamma', 'genextreme', 
+            'genpareto', 'gumbel_r', 'invgauss', 'logistic', 
+            'lognorm', 'nakagami', 'norm', 'rayleigh', 'weibull_min',
+        ]) # Candidates for re-para
+        with open('../config/dist_repara.json', 'r') as f: 
+            dist_config = json.load(f) 
+        idx_valid = np.array([dist in dist_config for dist in dist_names])
+        # Delete candidates that has no config
+        if not all(idx_valid):
+            warnings.warn(f'Distribution {dist_names[~idx_valid]} is not included in '
+                        'dist_repara.json and will be ignored')
+            dist_names = dist_names[idx_valid]
+        
+        # Fit marginal X
+        if verbose:
+            print(f'Step 1/{total_steps}: Fitting marginal X')
+        x_pd = Univariate(self.x, sample_coor=np.linspace(0, 2*self.x.max(), 1000))
+        x_pd.fit(maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical', 
+                 outlier_detect=False, verbose=False)
+        self.x_pd = x_pd
+        
+        # Fit marginal Y
+        if verbose:
+            print(f'Step 2/{total_steps}: Fitting marginal Y')
+        y_pd = Univariate(self.y, sample_coor=np.linspace(0, 2*self.y.max(), 1000))
+        y_pd.fit(maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical', 
+                 outlier_detect=False, verbose=False)
+        self.y_pd = y_pd
+        
+        # Fit conditional Y
+        if verbose:
+            print(f'Step 3/{total_steps}: Fitting individual conditional Y')
+        condY_pd = []
+        for cur_x in self.condY_x:
+            condY_data = self.y.copy()
+            condY_data[(self.x < cur_x - self.condY_dx) | (self.x > cur_x + self.condY_dx)] = np.nan
+            cur_pd = Univariate(condY_data, sample_coor=np.linspace(0, 2*self.x.max(), 1000))
+            cur_pd.fit(maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical', 
+                     outlier_detect=False, verbose=False)
+            condY_pd.append(cur_pd)
+        self.condY_pd = condY_pd
+        
+        # Fit the parameters of conditional Y using bulk of the data
+        if verbose:
+            print(f'Step 4/{total_steps}: Finding distributions to fit conditional Y')
+        df = get_condY_para_bulk()
+        condYs = []
+        for idx in range(len(df)):
+            condY = _CondY(
+                dist_name=df.index[idx], x=self.condY_x, 
+                params=df['param'][idx], dist_config=dist_config[df.index[idx]])
+            condY.fit()
+            condYs.append(condY)
+        self.condYs_bulk = condYs
+        
+    def predict(self, MRPs):
+        ''' Re-parameterize tail based on MRP and construct environmental contour 
+            Parameters:
+            -----------
+                MRP: numpy array. Target MRP
+        '''
+        
+        def get_condY_F(x_pd, beta, x):
+            ''' Return F of condY given beta '''
+            x_F = interp1d(x_pd.sample_coor, x_pd.sample_F)(x)
+            x_beta = std_norm.ppf(x_F)
+            y_beta_square = beta ** 2 - x_beta ** 2
+            y_beta_square[y_beta_square < 0] = np.nan
+            y_beta = np.sqrt(y_beta_square)
+            y_F = std_norm.cdf(y_beta)
+            return y_beta
+        
+        std_norm = stats.norm()
+
+        for MRP in MRPs:
+            beta = std_norm.ppf(1 - 1/self.x_pd.c_rate/MRP)
+            
+            # MRP of independent Y for validation
+            y_mrp = self.y_pd.predict(MRP=MRP)
+
+            # Jagged contour
+            condY_F = get_condY_F(self.x_pd, beta, self.condY_x)
+
+            # Determine range of re-parameterization
+
+            # Upper contour
+
+            # Lower contour
+
+            # Combine result
+    
+    
+        
+    def plot_diagnosis(self):
+        def plot_pd_diagnosis():
+            if ' ' in dropdown_pd.value: # contains list index
+                attr_name, idx = dropdown_pd.value.split(sep=' ')
+                pd = getattr(self, attr_name)[int(idx)]
+            else:
+                pd = getattr(self, dropdown_pd.value)
+            display(pd.diag_fig)
+
+        def update_pd_plot(change):
+            pd_display.clear_output(wait=True)
+            with pd_display:
+                plot_pd_diagnosis()
+                plt.show()
+
+        # Tab 1: Univirate fitting
+        dropdown_options = [('Marginal X', 'x_pd'), ('Marginal Y', 'y_pd')] +\
+            [('Conditional Y at X={:.1f}'.format(condY_x), 'condY_pd {}'.format(idx)) 
+             for idx, condY_x in enumerate(self.condY_x)]
+        dropdown_pd = widgets.Dropdown(options=dropdown_options, description='Item')
+        dropdown_pd.observe(update_pd_plot, names="value")
+        pd_display = widgets.Output()
+        with pd_display:
+            plot_pd_diagnosis()
+            plt.show()
+        tab1 = widgets.VBox(children=[dropdown_pd, pd_display])
+
+        # Tab 2: Multivirate fitting
+        tab2 = widgets.VBox(children=[])
+
+        tab = widgets.Tab(children=[tab1, tab2])
+        tab.set_title(0, 'Univariate fitting')
+        tab.set_title(1, 'Multivariate fitting')
+        return widgets.VBox(children=[tab])
+
 
 class Univariate:
     ''' Univariate random variable object with accurate tail extrapolation 
@@ -264,7 +454,11 @@ class Univariate:
         for dist_name in dist_names:
             # Fit distribution
             dist = getattr(stats, dist_name)
-            param = dist.fit(data, **dist_config.get(dist_name, [{}])[0])
+            if dist_config:
+                kwargs = dist_config[dist_name]['fit_kwargs']
+            else:
+                kwargs = {}
+            param = dist.fit(data, **kwargs)
             params.append(param)
             
             # calculate chi-squared
@@ -529,7 +723,98 @@ class _TailExtrapolation:
             ax.legend(loc='upper left')
             # if self.notebook_backend:
             #     plt.close()
-            
+
+
+class _CondY:
+    ''' Conditional distribution f(Y|X)
+        Parameters
+        ----------
+            dist_name: str, name of the distribution used for fitting
+            x: numpy array, x coordinates for condY
+            params: numpy ndarray, each column is the value of a parameter at x
+            dist_config: dict with key 'para_lowerbound', fitting config
+    '''
+    def __init__(self, dist_name, x, params, dist_config):
+        self.dist_name = dist_name
+        params_name = getattr(stats, dist_name).shapes
+        if params_name is None:
+            self.params_name = ['loc', 'scale']
+        else:
+            self.params_name = params_name.split(', ') + ['loc', 'scale']
+        self.x = x
+        self.params_raw = params
+        self._params_lb = dist_config['para_lowerbound']
+        
+    def __str__(self):
+        return f'Conditional distribution fitting using {self.dist_name}'
+    
+    def fit(self):
+        ''' Fit each condY parameter as a function of x
+            Note:
+            -----
+                If a parameter is fixed (e.g., floc=0), a function returning that 
+                    value is used
+                If a parameter is varying, fitting expression is determined by
+                    fitting_func
+            Variables added:
+            ----------------
+                self._coef_func: list with the same length of condY parameters
+                    loc and scale are included
+                    each list element is a function of x
+        '''
+        def fitting_func(x, a, b, c):
+            return a * x**b + c
+        
+        def constant_func(x, c):
+            return c
+        
+        coef_lb = {
+            '-inf': -np.inf * np.array([1, 1, 1]), 
+            0: [0, -np.inf, 0]
+        }
+        
+        coef_func = []
+        for param_raw, param_lb in zip(self.params_raw.T, self._params_lb):
+            unique_values = np.unique(param_raw)
+            if len(unique_values) == 1: # Fixed parameter
+                coef_func.append(partial(constant_func, c=unique_values[0]))
+            else:
+                popt, _ = curve_fit(
+                    fitting_func, self.x, param_raw, method='trf', 
+                    bounds=(coef_lb[param_lb], np.inf), max_nfev=1e4
+                )
+                coef_func.append(partial(fitting_func, a=popt[0], b=popt[1], c=popt[2]))
+        self._coef_func = coef_func
+        
+    def predict(self, x):
+        ''' Return a scipy distribution object '''
+        param = [func(x) for func in self._coef_func]
+        dist = stats._distn_infrastructure.rv_frozen(
+            getattr(stats, self.dist_name), 
+            *param[:-2], loc=param[-2], scale=param[-1]
+        )
+        return dist
+        
+    def plot_diagnosis(self, x_sample=None):
+        ''' Plot condY parameter fitting result
+            Parameters:
+            -----------
+                x_sample: array-like. If not provided, CondY.x is used with upper bound 
+                    extended to 1.5 times
+        '''
+        if x_sample is None:
+            x_sample = np.linspace(self.x.min(), 1.5 * self.x.max(), 200)
+        plt.figure()
+        for idx in range(self.params_raw.shape[1]):
+            h = plt.plot(self.x, self.params_raw[:, idx], 'x')
+            plt.plot(x_sample, [self._coef_func[idx](x) for x in x_sample],
+                     '-', color=h[0].get_color(), label=self.params_name[idx])
+        plt.xlabel('x')
+        plt.title(self.dist_name)
+        plt.grid(True)
+        plt.legend(loc='best')
+        plt.show()
+
 
 if __name__ == '__main__':
     import pickle

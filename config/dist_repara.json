@@ -1,82 +1,76 @@
 {
-    "burr12": [
-        {
+    "burr12": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ],
-    "expon": [
-        {
+        },
+        "para_lowerbound": [0, 0, 0, 0]
+    },
+    "expon": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ], 
-    "fatiguelife": [
-        {
+        },
+        "para_lowerbound": [0, 0]
+    },
+    "fatiguelife": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ], 
-    "gamma": [
-        {
+        },
+        "para_lowerbound": [0, 0, 0]
+    },
+    "gamma": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ], 
-    "genextreme": 
-    [
-        {
-            
-        }
-    ], 
-    "genpareto": 
-    [
-        {
-            
-        }
-    ], 
-    "gumbel_r":
-    [
-        {
-            
-        }
-    ], 
-    "invgauss":
-    [
-        {
+        },
+        "para_lowerbound": [0, 0, 0]
+    },
+    "genextreme": {
+        "fit_kwargs": {},
+        "para_lowerbound": ["-inf", "-inf", 0]
+    },
+    "genpareto": {
+        "fit_kwargs": {},
+        "para_lowerbound": ["-inf", "-inf", 0]
+    },
+    "gumbel_r": {
+        "fit_kwargs": {},
+        "para_lowerbound": ["-inf", 0]
+    },
+    "invgauss": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ], 
-    "logistic":
-    [
-        {
-            
-        }
-    ], 
-    "lognorm":
-    [
-        {
+        },
+        "para_lowerbound": [0, 0, 0]
+    },
+    "logistic": {
+        "fit_kwargs": {},
+        "para_lowerbound": ["-inf", 0]
+    },
+    "lognorm": {
+        "fit_kwargs": {
             "fscale": 1
-        }
-    ], 
-    "nakagami":
-    [
-        {
+        },
+        "para_lowerbound": [0, "-inf", 1]
+    },
+    "nakagami": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ], 
-    "norm":
-    [
-        {
-            
-        }
-    ], 
-    "rayleigh":
-    [
-        {
+        },
+        "para_lowerbound": [0, 0, 0]
+    },
+    "norm": {
+        "fit_kwargs": {},
+        "para_lowerbound": ["-inf", 0]
+    },
+    "rayleigh": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ], 
-    "weibull_min":
-    [
-        {
+        },
+        "para_lowerbound": [0, 0]
+    },
+    "weibull_min": {
+        "fit_kwargs": {
             "floc": 0
-        }
-    ]
+        },
+        "para_lowerbound": [0, 0, 0]
+    }
 }
