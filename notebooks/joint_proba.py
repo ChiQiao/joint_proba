@@ -16,183 +16,96 @@ from sklearn.metrics import r2_score
 
 class Multivariate:
     def __init__(self, df, col_x=0, col_y=1, condY_x=None):
-        self.x = df.iloc[:, col_x]
-        self.y = df.iloc[:, col_y]
+        self.x_data = df.iloc[:, col_x]
+        self.y_data = df.iloc[:, col_y]
         if condY_x is None:
-            self.condY_x = np.linspace(x.min(), x.max(), 10)
+            self.condY_x = np.linspace(self.x_data.min(), self.x_data.max(), 10)
         else:
             self.condY_x = condY_x
-        self.condY_dx = np.diff(condY_x).mean()
-        
 
-    def fit(self, plot_diagnosis=True, verbose=True):
+    def fit(self, dist_cands=None, plot_diagnosis=True, verbose=True):
         ''' Fit results that are independent from MRP 
             Variables added:
             ----------------
-                self.x_pd, y_pd, condY_pd: Univariate objects for marginal X & Y, 
+                self.x_dist, y_dist, condY_dist: Univariate objects for marginal X & Y, 
                     and conditional Y
                 self.condYs_bulk: list of _CondY object as candidates of condY fitting
                     results using the bulk of the data
         '''
-
-        def get_condY_para_bulk():
-            ''' Fit distribution for condY at various x 
-                Returns:
-                --------
-                    df: Dataframe of different distributions with averaged chi_square, 
-                        averaged r2, and parameters for the corresponding x.
-                Notes:
-                ------
-                    Only distributions with chi_square lower than 2 * optimal result 
-                        are returned
-            '''
-            df_temp = pd.DataFrame()
-            for condY_pd in self.condY_pd:
-                data = condY_pd.data
-                df_cur = Univariate.best_fit(
-                    data, dist_names=dist_names, dist_config=dist_config)
-                df_temp = pd.concat([df_temp, df_cur.set_index('Distribution')], axis=1)
-
-            # Arrange condY fitting results
-            # chi_square, r2: mean
-            # param: stack for different condY_x
-            df = pd.concat(
-                [
-                    df_temp['chi_square'].mean(axis=1, skipna=False),
-                    df_temp['r2'].mean(axis=1, skipna=False),
-                    df_temp['param'].apply(np.vstack, axis=1),
-                ], axis=1
-            ).rename(
-                columns={0:'chi_square', 1:'r2', 2:'param'}
-            ).sort_values(by='chi_square')
-
-            # Select candidates based on chi_square
-            df = df[df['chi_square'] < df['chi_square'][0] * 2]
-            return df
-
-        total_steps = 5
-
         # Distributions for re-parameterization and their configs
-        dist_names = np.array([
-            'burr12', 'expon', 'fatiguelife', 'gamma', 'genextreme', 
-            'genpareto', 'gumbel_r', 'invgauss', 'logistic', 
-            'lognorm', 'nakagami', 'norm', 'rayleigh', 'weibull_min',
-        ]) # Candidates for re-para
+        if dist_cands is None:
+            dist_cands = np.array([
+                'burr12', 'expon', 'fatiguelife', 'gamma', 'genextreme', 
+                'genpareto', 'gumbel_r', 'invgauss', 'logistic', 
+                'lognorm', 'nakagami', 'norm', 'rayleigh', 'weibull_min',
+            ])
         with open('../config/dist_repara.json', 'r') as f: 
             dist_config = json.load(f) 
-        idx_valid = np.array([dist in dist_config for dist in dist_names])
+        idx_valid = np.array([dist in dist_config for dist in dist_cands])
         # Delete candidates that has no config
         if not all(idx_valid):
-            warnings.warn(f'Distribution {dist_names[~idx_valid]} is not included in '
-                        'dist_repara.json and will be ignored')
-            dist_names = dist_names[idx_valid]
+            warnings.warn(f'Distribution {dist_cands[~idx_valid]} is not '
+                        'included in dist_repara.json and will be ignored')
+            dist_cands = dist_cands[idx_valid]
+        self.dist_cands = dist_cands
         
         # Fit marginal X
         if verbose:
-            print(f'Step 1/{total_steps}: Fitting marginal X')
-        x_pd = Univariate(self.x, sample_coor=np.linspace(0, 2*self.x.max(), 1000))
-        x_pd.fit(maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical', 
-                 outlier_detect=False, verbose=False)
-        self.x_pd = x_pd
+            print('Fitting marginal X')
+        self._fit_marginalX()
         
         # Fit marginal Y
         if verbose:
-            print(f'Step 2/{total_steps}: Fitting marginal Y')
-        y_pd = Univariate(self.y, sample_coor=np.linspace(0, 2*self.y.max(), 1000))
-        y_pd.fit(maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical', 
-                 outlier_detect=False, verbose=False)
-        self.y_pd = y_pd
+            print('Fitting marginal Y')
+        self._fit_marginalY()
         
-        # Fit conditional Y
+        # Fit discrete conditional Y
         if verbose:
-            print(f'Step 3/{total_steps}: Fitting individual conditional Y')
-        condY_pd = []
-        for cur_x in self.condY_x:
-            condY_data = self.y.copy()
-            condY_data[(self.x < cur_x - self.condY_dx) | (self.x > cur_x + self.condY_dx)] = np.nan
-            cur_pd = Univariate(condY_data, sample_coor=np.linspace(0, 2*self.x.max(), 1000))
-            cur_pd.fit(maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical', 
-                     outlier_detect=False, verbose=False)
-            condY_pd.append(cur_pd)
-        self.condY_pd = condY_pd
+            print('Fitting discrete conditional Y')
+        self._fit_condY_disc()
         
         # Fit the parameters of conditional Y using bulk of the data
         if verbose:
-            print(f'Step 4/{total_steps}: Finding distributions to fit conditional Y')
-        df = get_condY_para_bulk()
-        condYs = []
-        for idx in range(len(df)):
-            condY = _CondY(
-                dist_name=df.index[idx], x=self.condY_x, 
-                params=df['param'][idx], dist_config=dist_config[df.index[idx]])
-            condY.fit()
-            condYs.append(condY)
-        self.condYs_bulk = condYs
+            print('Fitting continuous conditional Y using bulk')
+        df = self._get_condY_para_bulk(dist_config)
+        self.condY_cont_dists_bulk = self._fit_condY_cont(df, dist_config)
         
-    def predict(self, MRPs):
+    def predict(self, mrp):
         ''' Re-parameterize tail based on MRP and construct environmental contour 
             Parameters:
             -----------
                 MRP: numpy array. Target MRP
         '''
-        
-        def get_condY_F(x_pd, beta, x):
-            ''' Return F of condY given beta '''
-            x_F = interp1d(x_pd.sample_coor, x_pd.sample_F)(x)
-            x_beta = std_norm.ppf(x_F)
-            y_beta_square = beta ** 2 - x_beta ** 2
-            y_beta_square[y_beta_square < 0] = np.nan
-            y_beta = np.sqrt(y_beta_square)
-            y_F = std_norm.cdf(y_beta)
-            return y_beta
-        
-        std_norm = stats.norm()
-
-        for MRP in MRPs:
-            beta = std_norm.ppf(1 - 1/self.x_pd.c_rate/MRP)
-            
-            # MRP of independent Y for validation
-            y_mrp = self.y_pd.predict(MRP=MRP)
-
-            # Jagged contour
-            condY_F = get_condY_F(self.x_pd, beta, self.condY_x)
-
-            # Determine range of re-parameterization
-
-            # Upper contour
-
-            # Lower contour
-
-            # Combine result
+        pass
     
     
         
     def plot_diagnosis(self):
-        def plot_pd_diagnosis():
-            if ' ' in dropdown_pd.value: # contains list index
-                attr_name, idx = dropdown_pd.value.split(sep=' ')
-                pd = getattr(self, attr_name)[int(idx)]
+        def plot_dist_diagnosis():
+            if ' ' in dropdown_dist.value: # contains list index
+                attr_name, idx = dropdown_dist.value.split(sep=' ')
+                dist = getattr(self, attr_name)[int(idx)]
             else:
-                pd = getattr(self, dropdown_pd.value)
-            display(pd.diag_fig)
+                dist = getattr(self, dropdown_dist.value)
+            display(dist.diag_fig)
 
-        def update_pd_plot(change):
-            pd_display.clear_output(wait=True)
-            with pd_display:
-                plot_pd_diagnosis()
+        def update_dist_plot(change):
+            dist_display.clear_output(wait=True)
+            with dist_display:
+                plot_dist_diagnosis()
                 plt.show()
 
         # Tab 1: Univirate fitting
-        dropdown_options = [('Marginal X', 'x_pd'), ('Marginal Y', 'y_pd')] +\
-            [('Conditional Y at X={:.1f}'.format(condY_x), 'condY_pd {}'.format(idx)) 
+        dropdown_options = [('Marginal X', 'x_dist'), ('Marginal Y', 'y_dist')] +\
+            [('Conditional Y at X={:.1f}'.format(condY_x), 'condY_dist {}'.format(idx)) 
              for idx, condY_x in enumerate(self.condY_x)]
-        dropdown_pd = widgets.Dropdown(options=dropdown_options, description='Item')
-        dropdown_pd.observe(update_pd_plot, names="value")
-        pd_display = widgets.Output()
-        with pd_display:
-            plot_pd_diagnosis()
+        dropdown_dist = widgets.Dropdown(options=dropdown_options, description='Item')
+        dropdown_dist.observe(update_dist_plot, names="value")
+        dist_display = widgets.Output()
+        with dist_display:
+            plot_dist_diagnosis()
             plt.show()
-        tab1 = widgets.VBox(children=[dropdown_pd, pd_display])
+        tab1 = widgets.VBox(children=[dropdown_dist, dist_display])
 
         # Tab 2: Multivirate fitting
         tab2 = widgets.VBox(children=[])
@@ -201,6 +114,190 @@ class Multivariate:
         tab.set_title(0, 'Univariate fitting')
         tab.set_title(1, 'Multivariate fitting')
         return widgets.VBox(children=[tab])
+
+    def _fit_marginalX(self):
+        ''' Fit marginal distribution for x using Univariate object
+            Variables added:
+            ----------------
+                self.x_dist: Univariate object
+        '''
+        x_dist = Univariate(
+            self.x_data, 
+            sample_coor=np.linspace(0, 2*self.x_data.max(), 1000))
+        x_dist.fit(
+            maxima_extract='Annual', maxima_fit='GumbelChart', 
+            method_bulk='Empirical', outlier_detect=False, verbose=False)
+        self.x_dist = x_dist
+
+    def _fit_marginalY(self):
+        ''' Fit marginal distribution for y using Univariate object
+            Variables added:
+            ----------------
+                self.y_dist: Univariate object
+        '''
+        y_dist = Univariate(
+            self.y_data, 
+            sample_coor=np.linspace(0, 2*self.y_data.max(), 1000))
+        y_dist.fit(
+            maxima_extract='Annual', maxima_fit='GumbelChart', 
+            method_bulk='Empirical', outlier_detect=False, verbose=False)
+        self.y_dist = y_dist
+
+    def _fit_condY_disc(self):
+        ''' Fit conditional distributions using Univariate object
+            Note:
+            -----
+                x coordinate is determined by self.condY_x
+            Variables added:
+            ----------------
+                self.condY_dist_dists: list of Univariate objects
+        '''
+        condY_disc_dists = []
+        condY_dx = np.diff(self.condY_x).mean()
+        for cur_x in self.condY_x:
+            condY_data = self.y_data.copy()
+            condY_data[
+                (self.x_data < cur_x - condY_dx) |
+                (self.x_data > cur_x + condY_dx)
+                ] = np.nan
+            cur_dist = Univariate(
+                condY_data, 
+                sample_coor=np.linspace(0, 2*self.x_data.max(), 1000)
+                )
+            cur_dist.fit(
+                maxima_extract='Annual', maxima_fit='GumbelChart', 
+                method_bulk='Empirical', outlier_detect=False, verbose=False)
+            condY_disc_dists.append(cur_dist)
+        self.condY_disc_dists = condY_disc_dists
+
+    def _fit_condY_cont(self, df, dist_config):
+        ''' Fit condY parameters as functions of x for some dist. candidates
+            Parameters:
+            -----------
+                df: DataFrame with index as dist. names and column 'param' as a 
+                    numpy array (dist. parameters at different x, where x is 
+                    determined by self.condY_x)
+                dist_conf: dict of dist. fitting configuration
+            Returns:
+            ----------------
+                condY_cont_dists: list of _CondY objects
+        '''
+        condY_cont_dists = []
+        for idx in range(len(df)):
+            condY = _CondY(
+                dist_name=df.index[idx], x=self.condY_x, 
+                params=df['param'][idx], dist_config=dist_config[df.index[idx]])
+            condY.fit()
+            condY_cont_dists.append(condY)
+        return condY_cont_dists
+
+    def _get_condY_para_bulk(self, dist_config):
+        ''' Fit distribution for condY at various x 
+            Parameters:
+            -----------
+                dist_config: dict of dist. fitting configuration
+            Returns:
+            --------
+                df: Dataframe of different distributions with averaged chi_square, 
+                    averaged r2, and parameters for the corresponding x.
+            Notes:
+            ------
+                Only distributions with chi_square lower than 2 * optimal result 
+                    are returned
+        '''
+        df_temp = pd.DataFrame()
+        for condY_dist in self.condY_disc_dists:
+            data = condY_dist.data
+            df_cur = Univariate.best_fit(
+                data, dist_names=self.dist_cands, dist_config=dist_config)
+            df_temp = pd.concat([df_temp, df_cur.set_index('Distribution')], axis=1)
+
+        # Arrange condY fitting results
+        # chi_square, r2: mean
+        # param: stack for different condY_x
+        df = pd.concat(
+            [
+                df_temp['chi_square'].mean(axis=1, skipna=False),
+                df_temp['r2'].mean(axis=1, skipna=False),
+                df_temp['param'].apply(np.vstack, axis=1),
+            ], axis=1
+        ).rename(
+            columns={0:'chi_square', 1:'r2', 2:'param'}
+        ).sort_values(by='chi_square')
+
+        # Select candidates based on chi_square
+        df = df[df['chi_square'] < df['chi_square'][0] * 2]
+        return df
+
+    def _get_jaggaed_contour(self, mrp):
+        ''' Calculate a jagged contour from self.condY_disc_dists
+            Parameters:
+            -----------
+                mrp: MRP of the contour
+            Returns:
+            --------
+                res: dict including x, y_bot, and y_top
+            Note:
+            -----
+                x coordinate is determined by self.condY_x
+        '''
+        condY_F = self._get_condY_F(mrp, self.condY_x)
+        contour = np.array(
+            [interp1d(pd.sample_F, pd.sample_coor)([1-F, F]) 
+            for pd, F in zip(self.condY_disc_dists, condY_F)])
+        res = {
+            'x': self.condY_x, 
+            'y_bot': contour[:, 0],
+            'y_top': contour[:, 1],
+        }
+        return res
+
+    def _get_smooth_contour(self, condY, mrp):
+        ''' Calculate a smooth contour from a _CondY object
+            Parameters:
+            -----------
+                condY: _CondY object
+                mrp: MRP of the contour
+            Returns:
+            --------
+                res: dict including dist_name, x, y_bot, and y_top
+            Note:
+            -----
+                x coordinate is determined by self.x_dist.sample_coor
+        '''
+        condY_F = self._get_condY_F(mrp, self.x_dist.sample_coor)
+        contour = np.array([
+            condY.predict(x).ppf([1-F, F]) for x, F 
+            in zip(self.x_dist.sample_coor, condY_F)
+        ])
+        res = {
+            'dist_name': condY.dist_name,
+            'x': self.x_dist.sample_coor,
+            'y_bot': contour[:, 0],
+            'y_top': contour[:, 1],
+        }
+        return res
+
+    def _get_condY_F(self, mrp, x):
+        ''' Return F of condY given MRP
+            Parameters:
+            -----------
+                mrp: float
+                x: array-like, output coordinates for y_F
+            Returns:
+            --------
+                y_F: numpy array with the same size as x
+        '''
+        std_norm = stats.norm()
+        beta = std_norm.ppf(1 - 1/self.x_dist.c_rate/mrp)
+        x_F = interp1d(self.x_dist.sample_coor, self.x_dist.sample_F)(x)
+        x_beta = std_norm.ppf(x_F)
+        y_beta_square = beta ** 2 - x_beta ** 2
+        y_beta_square[y_beta_square < 0] = np.nan
+        y_beta = np.sqrt(y_beta_square)
+        with np.errstate(invalid='ignore'):
+            y_F = std_norm.cdf(y_beta)
+        return y_F
 
 
 class Univariate:
@@ -223,8 +320,24 @@ class Univariate:
     '''
 
     def __init__(self, data, year=None, total_year=None, sample_coor=None):
+        def infer_total_year(series):
+            ''' Infer total years from a pandas series 
+            based on starting and ending days in that year '''
+            first_year_ratio = 1 - \
+                (series.index[0].dayofyear - 1) / \
+                days_in_year(series.index[0].year)
+            last_year_ratio = series.index[-1].dayofyear / \
+                days_in_year(series.index[-1].year)
+            total_year = series.index[-1].year - series.index[0].year - 1 +\
+                first_year_ratio + last_year_ratio
+            return total_year, first_year_ratio, last_year_ratio
+
+        def days_in_year(year):
+            ''' Total days in a year '''
+            return 366 if calendar.isleap(year) else 365
+
         if isinstance(data, pd.Series):
-            self.total_year, first_year_ratio, last_year_ratio = Univariate._infer_total_year(data)
+            self.total_year, first_year_ratio, last_year_ratio = infer_total_year(data)
             idx_valid = ~np.isnan(data.values)
             self.data = data.values[idx_valid]
             self.year = np.array(data.index.year)[idx_valid]
@@ -359,7 +472,7 @@ class Univariate:
         if self.notebook_backend:
             plt.close(fig)
 
-    def predict(self, MRP=None, val=None):
+    def predict(self, mrp=None, val=None):
         ''' Predict value given an MRP, or MRP given a value
             Parameters:
             -----------
@@ -372,10 +485,10 @@ class Univariate:
             -----
                 Only one of MRP and val should be provided
         '''
-        if MRP is not None and val is None: # MRP provided
+        if mrp is not None and val is None: # MRP provided
             idx = np.isnan(self.sample_mrp)
-            return interp1d(self.sample_mrp[~idx], self.sample_coor[~idx])(MRP)
-        elif MRP is None and val is not None: # val provided
+            return interp1d(self.sample_mrp[~idx], self.sample_coor[~idx])(mrp)
+        elif mrp is None and val is not None: # val provided
             return interp1d(self.sample_coor, self.sample_mrp)(val)
         else:
             raise AttributeError('Only one of MRP and val should be provided')
@@ -507,24 +620,6 @@ class Univariate:
             raise AttributeError(
                 'Unsupported calculation method for plotting position')
 
-    @staticmethod
-    def _infer_total_year(series):
-        ''' Infer total years from a pandas series 
-        based on starting and ending days in that year '''
-        first_year_ratio = 1 - \
-            (series.index[0].dayofyear - 1) / \
-            Univariate._days_in_year(series.index[0].year)
-        last_year_ratio = series.index[-1].dayofyear / \
-            Univariate._days_in_year(series.index[-1].year)
-        total_year = series.index[-1].year - series.index[0].year - 1 +\
-            first_year_ratio + last_year_ratio
-        return total_year, first_year_ratio, last_year_ratio
-
-    @staticmethod
-    def _days_in_year(year):
-        ''' Total days in a year '''
-        return 366 if calendar.isleap(year) else 365
-
 
 class _TailExtrapolation:
     ''' Extrapolation the right tail of a distribution
@@ -586,7 +681,7 @@ class _TailExtrapolation:
             Variables added:
             ----------------
                 self.maxima_inlier_mask: Mask indicating inliers
-                self.maxima_pd: Probability distribution for the maxima
+                self.maxima_dist: Probability distribution for the maxima
                 self.threshold: Threshold of X between bulk and tail, minimum value is 
                     constrained to be no lower than 5 percentile of F_maxima
             Parameters:
@@ -635,8 +730,8 @@ class _TailExtrapolation:
             ax.grid(True)
             ax.legend(loc='best')
             
-        self.maxima_pd = stats.gumbel_r(loc=-b/k, scale=1/k)
-        self.maxima_inlier_mask[self.maxima < self.maxima_pd.ppf(0.05)] = False
+        self.maxima_dist = stats.gumbel_r(loc=-b/k, scale=1/k)
+        self.maxima_inlier_mask[self.maxima < self.maxima_dist.ppf(0.05)] = False
         self.threshold = self.maxima[self.maxima_inlier_mask].min()
 
     def _maxima_to_continuous(self, plot_diagnosis: bool):
@@ -652,12 +747,12 @@ class _TailExtrapolation:
         mrp_ratio_emp = m_mrp_emp / interp1d(c_data, c_mrp_emp)(m_data)
 
         # Calculate the corresponding t coordinates for the empirical MRP ratio
-        t_emp = -np.log(self.maxima_pd.cdf(m_data))
+        t_emp = -np.log(self.maxima_dist.cdf(m_data))
 
         # Target MRP ratio at self.threshold
-        t_threshold = -np.log(self.maxima_pd.cdf(self.threshold))
+        t_threshold = -np.log(self.maxima_dist.cdf(self.threshold))
         c_mrp_threshold = 1 / c_rate / (1 - interp1d(self.sample_coor, self.bulk_F)(self.threshold))
-        m_mrp_threshold = 1 / m_rate / (1 - self.maxima_pd.cdf(self.threshold))
+        m_mrp_threshold = 1 / m_rate / (1 - self.maxima_dist.cdf(self.threshold))
         mrp_ratio_threshold = m_mrp_threshold / c_mrp_threshold
 
         # Prepare fitting data
@@ -676,7 +771,7 @@ class _TailExtrapolation:
         popt, _ = curve_fit(func, t_emp, mrp_ratio_emp, bounds=([0, 0, 1], np.inf), sigma=sigma, max_nfev=1e4)
 
         # Convert tail MRP
-        m_sample_F = self.maxima_pd.cdf(self.sample_coor)
+        m_sample_F = self.maxima_dist.cdf(self.sample_coor)
         m_sample_F[self.sample_coor < self.threshold] = np.nan
         with np.errstate(divide='ignore'):
             m_sample_mrp = 1 / m_rate / (1 - m_sample_F)
@@ -826,7 +921,11 @@ if __name__ == '__main__':
     # test.fit()
     # test.plot_diagnosis()
 
-    x_pd = Univariate(df.iloc[:, 0])
-    x_pd.fit()
-    x_pd.plot_diagnosis()
+    # x_dist = Univariate(df.iloc[:, 0])
+    # x_dist.fit()
+    # x_dist.plot_diagnosis()
     # print(dir(te))
+
+    # Test for Multivariate class
+    test = Multivariate(df, condY_x=np.arange(1, 22))
+    test.fit()
