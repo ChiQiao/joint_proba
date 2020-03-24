@@ -9,19 +9,36 @@ import warnings
 from functools import partial
 from scipy import stats
 from scipy.interpolate import interp1d
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, minimize
 from sklearn import linear_model
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
 
 class Multivariate:
-    def __init__(self, df, col_x=0, col_y=1, condY_x=None):
+    def __init__(self, df, col_x=0, col_y=1, condY_x=None, dist_cands=None):
         self.x_data = df.iloc[:, col_x]
         self.y_data = df.iloc[:, col_y]
         if condY_x is None:
             self.condY_x = np.linspace(self.x_data.min(), self.x_data.max(), 10)
         else:
             self.condY_x = condY_x
+
+        if dist_cands is None:
+            dist_cands = np.array([
+                'burr12', 'expon', 'fatiguelife', 'gamma', 'genextreme', 
+                'genpareto', 'gumbel_r', 'invgauss', 'logistic', 
+                'lognorm', 'nakagami', 'norm', 'rayleigh', 'weibull_min',
+            ])
+        with open('../config/dist_repara.json', 'r') as f: 
+            dist_config = json.load(f) 
+        idx_valid = np.array([dist in dist_config for dist in dist_cands])
+        # Delete candidates that has no config
+        if not all(idx_valid):
+            warnings.warn(f'Distribution {dist_cands[~idx_valid]} is not '
+                        'included in dist_repara.json and will be ignored')
+            dist_cands = dist_cands[idx_valid]
+        self.dist_cands = dist_cands
+        self.dist_config = dist_config
 
     def fit(self, dist_cands=None, plot_diagnosis=True, verbose=True):
         ''' Fit results that are independent from MRP 
@@ -67,8 +84,8 @@ class Multivariate:
         # Fit the parameters of conditional Y using bulk of the data
         if verbose:
             print('Fitting continuous conditional Y using bulk')
-        df = self._get_condY_para_bulk(dist_config)
-        self.condY_cont_dists_bulk = self._fit_condY_cont(df, dist_config)
+        df = self._get_condY_para_bulk()
+        self.condY_cont_dists_bulk = self._fit_condY_cont(df)
         
     def predict(self, mrp):
         ''' Re-parameterize tail based on MRP and construct environmental contour 
@@ -170,7 +187,7 @@ class Multivariate:
             condY_disc_dists.append(cur_dist)
         self.condY_disc_dists = condY_disc_dists
 
-    def _fit_condY_cont(self, df, dist_config):
+    def _fit_condY_cont(self, df):
         ''' Fit condY parameters as functions of x for some dist. candidates
             Parameters:
             -----------
@@ -184,22 +201,25 @@ class Multivariate:
         '''
         condY_cont_dists = []
         for idx in range(len(df)):
+            params = df['param'][idx]
+            idx_valid = ~np.isnan(params).any(axis=1)
             condY = _CondY(
-                dist_name=df.index[idx], x=self.condY_x, 
-                params=df['param'][idx], dist_config=dist_config[df.index[idx]])
+                dist_name=df.index[idx], 
+                x=self.condY_x[idx_valid], 
+                params=params[idx_valid], 
+                dist_config=self.dist_config[df.index[idx]]
+                )
             condY.fit()
             condY_cont_dists.append(condY)
         return condY_cont_dists
 
-    def _get_condY_para_bulk(self, dist_config):
-        ''' Fit distribution for condY at various x 
-            Parameters:
-            -----------
-                dist_config: dict of dist. fitting configuration
+    def _get_condY_para_bulk(self):
+        ''' Fit dist parameters for self.condY_disc_dists using the bulk
             Returns:
             --------
-                df: Dataframe of different distributions with averaged chi_square, 
-                    averaged r2, and parameters for the corresponding x.
+                df: Dataframe of different distributions (as index) with
+                    averaged chi_square, averaged r2, and parameters for the 
+                    corresponding x.
             Notes:
             ------
                 Only distributions with chi_square lower than 2 * optimal result 
@@ -209,8 +229,9 @@ class Multivariate:
         for condY_dist in self.condY_disc_dists:
             data = condY_dist.data
             df_cur = Univariate.best_fit(
-                data, dist_names=self.dist_cands, dist_config=dist_config)
-            df_temp = pd.concat([df_temp, df_cur.set_index('Distribution')], axis=1)
+                data, dist_names=self.dist_cands, dist_config=self.dist_config)
+            df_temp = pd.concat(
+                [df_temp, df_cur.set_index('Distribution')], axis=1)
 
         # Arrange condY fitting results
         # chi_square, r2: mean
@@ -228,6 +249,136 @@ class Multivariate:
         # Select candidates based on chi_square
         df = df[df['chi_square'] < df['chi_square'][0] * 2]
         return df
+
+    def _get_condY_para_tail(self, mrp, range_ratio=10):
+        ''' Fit dist parameters for self.condY_disc_dists using tail re-para
+            Parameters:
+            -----------
+                mrp: number
+                range_ratio: the conditional dist. between MRP/range_ratio and
+                    MRP*range_ratio will be used for re-para
+            Returns:
+            --------
+                df: Dataframe of different distributions (as index) with
+                    'param' for the dist parameters, 'fit_coor', 'mrp_true', and 
+                    'mrp_pred' for diagnosis
+        '''
+        def get_condY_F_range(mv, mrp, range_ratio):
+            ''' Determine range of re-parameterization '''
+            std_norm = stats.norm()
+            # Three circles for MRP, MRP/range_ratio, MRP*range_ratio
+            beta = std_norm.ppf(1 - 1/mv.x_dist.c_rate/mrp)
+            beta_lb = std_norm.ppf(1 - 1/mv.x_dist.c_rate/(mrp/range_ratio))
+            beta_ub = std_norm.ppf(1 - 1/mv.x_dist.c_rate/(mrp*range_ratio))
+            # x coordinates of the MRP circle (x_beta)
+            x_F = interp1d(mv.x_dist.sample_coor, mv.x_dist.sample_F)(mv.condY_x)
+            x_beta = std_norm.ppf(x_F)
+            # y coordinates of the ellipse connecting circle 1&2, 1&3
+            y_beta_lb = beta_lb * np.sqrt(1 - x_beta**2 / beta**2)
+            y_beta_ub = beta_ub * np.sqrt(1 - x_beta**2 / beta**2)
+            # CDF of these y coordinates
+            condY_F_lb = std_norm.cdf(y_beta_lb)
+            condY_F_ub = std_norm.cdf(y_beta_ub)
+            return condY_F_lb, condY_F_ub
+
+        def get_para_bounds(dist_config):
+            ''' Process parameter boundaries for a given distribution config 
+                Convert the 'fit_kwargs' and 'para_lowerbound' in dist_config
+                into the form of ((lb1, ub1), (lb2, ub2), ...) for optimization
+            '''
+            lbs = [val if not isinstance(val, str) else None 
+                for val in dist_config['para_lowerbound']]
+            ubs = [None] * len(lbs)
+            if 'fscale' in dist_config['fit_kwargs']:
+                ubs[-1] = lbs[-1] = dist_config['fit_kwargs']['fscale']
+            if 'floc' in dist_config['fit_kwargs']:
+                ubs[-2] = lbs[-2] = dist_config['fit_kwargs']['floc']
+            bnds = tuple((lb, ub) for lb, ub in zip(lbs, ubs))
+            return bnds
+        
+        def dist_to_mrp(param, dist_name, fit_coor, rate):
+            ''' Predict MRP for fit_coor using dist_name with param '''
+            dist = stats._distn_infrastructure.rv_frozen(
+                getattr(stats, dist_name), 
+                *param[:-2], loc=param[-2], scale=param[-1]
+            )
+            F = dist.cdf(fit_coor)
+            mrp_pred = 1 / rate / (1-F)
+            return mrp_pred
+
+        def mrp_msle(param, dist_name, fit_coor, rate, mrp_true):
+            ''' Loss function for optimization '''
+            mrp_pred = dist_to_mrp(param, dist_name, fit_coor, rate)
+            msle = np.nanmean((np.log(mrp_pred) - np.log(mrp_true)) ** 2)
+            return msle
+
+        condY_F_lb, condY_F_ub = get_condY_F_range(self, mrp, range_ratio)
+        df = pd.DataFrame()
+        for dist_name in self.dist_cands:
+            param, diag_fit_coor, diag_mrp_true, diag_mrp_pred = [], [], [], []
+            param_prev = None
+            bnds = get_para_bounds(self.dist_config[dist_name])
+            for uv, F_lb, F_ub in zip(self.condY_disc_dists, condY_F_lb, condY_F_ub):
+                mrp_true = np.copy(uv.sample_mrp)
+                fit_coor = np.copy(uv.sample_coor)
+                y_lb, y_ub = interp1d(uv.sample_F, uv.sample_coor)([F_lb, F_ub])
+                idx_nan = (uv.sample_F < F_lb) | (uv.sample_F > F_ub)
+                mrp_true[idx_nan] = np.nan
+                fit_coor[idx_nan] = np.nan
+                if param_prev is None:
+                    x0 = getattr(stats, dist_name).fit(
+                        uv.data, **self.dist_config[dist_name]['fit_kwargs'])
+                else:
+                    x0 = param_prev
+                res = minimize(
+                    mrp_msle, x0, 
+                    args=(dist_name, fit_coor, uv.c_rate, mrp_true), 
+                    method='SLSQP',
+                    bounds=bnds, tol=1e-6, options={'maxiter': 1e4}
+                    )
+                mrp_pred = dist_to_mrp(res['x'], dist_name, fit_coor, uv.c_rate)
+                if res['success']:
+                    param_prev = np.copy(res['x'])
+                else:
+                    res['x'].fill(np.nan)
+                    mrp_pred.fill(np.nan)
+                # print(f"{dist_name}: {res['message']}")
+                param.append(res['x'])
+                # Record diagnostic information
+                diag_fit_coor.append(fit_coor)
+                diag_mrp_true.append(mrp_true)
+                diag_mrp_pred.append(mrp_pred)
+            df = df.append(
+                pd.DataFrame.from_dict({
+                    'dist_name': dist_name, 
+                    'param': [np.vstack(param)],
+                    'fit_coor': [np.vstack(diag_fit_coor)],
+                    'mrp_true': [np.vstack(diag_mrp_true)], 
+                    'mrp_pred': [np.vstack(diag_mrp_pred)], 
+                }), ignore_index=True
+            )
+        df = df.set_index('dist_name')
+        return df
+    
+    @staticmethod
+    def plot_repara_result(df, condY_x, dist_name):
+        fit_coor = df['fit_coor'][dist_name]
+        mrp_true = df['mrp_true'][dist_name]
+        mrp_pred = df['mrp_pred'][dist_name]
+        para = df['param'][dist_name]
+
+        plt.figure(figsize=(16,8))
+        plt.subplot(1,2,1)
+        for y, true, pred, x in zip(fit_coor, mrp_true, mrp_pred, condY_x):
+            h = plt.plot(true, y, '-', label=x)
+            plt.plot(pred, y, '--', color=h[0].get_color())
+        plt.xscale('log')
+        plt.grid(True)
+
+        plt.subplot(1,2,2)
+        plt.plot(condY_x, para)
+        plt.grid(True)
+        plt.show()
 
     def _get_jaggaed_contour(self, mrp):
         ''' Calculate a jagged contour from self.condY_disc_dists
@@ -538,7 +689,7 @@ class Univariate:
             print(f'          Best fit distribution: {fit_df.Distribution[0]}')
 
     @staticmethod
-    def best_fit(data, dist_names=None, qq_plot=False, dist_config={}):
+    def best_fit(data, dist_names=None, qq_plot=False, dist_config=None):
         ''' Search for best distribution fitting based on chi-squar test
             List for scipy distribution: 
                 https://docs.scipy.org/doc/scipy/reference/stats.html
@@ -567,10 +718,10 @@ class Univariate:
         for dist_name in dist_names:
             # Fit distribution
             dist = getattr(stats, dist_name)
-            if dist_config:
-                kwargs = dist_config[dist_name]['fit_kwargs']
-            else:
+            if dist_config is None:
                 kwargs = {}
+            else:
+                kwargs = dist_config[dist_name]['fit_kwargs']
             param = dist.fit(data, **kwargs)
             params.append(param)
             
