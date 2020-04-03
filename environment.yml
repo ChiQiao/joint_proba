@@ -1,0 +1,20 @@
+name: pyEC
+channels:
+- defaults
+- conda-forge
+dependencies:
+- python=3.7
+- pip
+- jupyter
+- conda
+- scipy
+- pandas
+- numpy
+- matplotlib
+- pip:
+  - autopep8
+  - pylint
+  - rope
+  - jupyter_contrib_nbextensions
+  - scikit-learn
+  - streamlit
