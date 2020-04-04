@@ -114,6 +114,26 @@ def best_fit(data, dist_names=None, criteria='chi-square', qq_plot=False, dist_c
 
     return dist, dist_name, fit_df
 
+def plotting_position(data, method='unbiased'):
+        ''' Plotting position (empirical CDF) of data 
+            Parameters:
+            -----------
+                data: array-like
+                method:
+                    'unbiased': Unbiased estimation used for Gumbel chart
+                    'simple': order / (N + 1), open range of (0, 1)
+        '''
+        assert not np.any(np.isnan(data)), 'data should not include any NaN'
+        n = len(data)
+        if method == 'unbiased':
+            return ((np.arange(n) + 1) - 0.44) / (n + 0.12)
+        elif method == 'simple':
+            return (np.arange(n) + 1) / (n + 1)
+        else:
+            raise AttributeError(
+                'Unsupported calculation method for plotting position')
+
+
 if __name__ == '__main__':
     from scipy.stats import weibull_min
     r = weibull_min.rvs(2, size=1000)

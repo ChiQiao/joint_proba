@@ -1,102 +1,103 @@
 import calendar
-import copy
 import ipywidgets as widgets
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import warnings
 from scipy import stats
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 from sklearn import linear_model
 from sklearn.preprocessing import StandardScaler
 
+from pyEC import util
+
 
 class Univariate:
-    ''' Univariate random variable object with accurate tail extrapolation 
-            The right tail is extrapolated, assuming a right-skewed distribution
+    ''' Tail extrapolation of uni-variable as a time series
+        Environmental variables (e.g., wind, wave) with short intervals are not
+            dependent, as such Extreme Value Theory cannot be used for 
+            distribution tail extrapolation. 
+        This Univariate class applies Extreme Value Theory to the independent
+            subset, and then convert the extrapolation result to the original
+            dataset using MRP ratio curve. 
+        Methods include fit, predict, and plot_diagnosis.
         Parameters
         ----------
             data: pandas series with datetime index. If constructing conditional 
-                distribution, NaN should be retained for total_year to be 
+                distribution, NaN should be retained for total year to be 
                 correctly inferred
             sample_coor: numpy array. Sample coordinate for outputs reference. 
                 Inferred from data if not provided
     '''
 
     def __init__(self, data, sample_coor=None):
+        ''' Variables added:
+                data: with NaN removed
+                time: datetimes corresponding to data
+                total_year: float, total years covered by data
+                sample_coor: numpy array, coordinates of discretized variable
+                notebook_backend: bool, whether this is a notebook environment
+        '''
         def days_in_year(year):
             ''' Total days in a year '''
             return 366 if calendar.isleap(year) else 365
 
+        # Sanity check
         if not isinstance(data, pd.Series):
             raise TypeError('data should be a pandas series')
-
+        if not isinstance(data.index, pd.core.indexes.datetimes.DatetimeIndex):
+            raise TypeError('data index should be datetimes')
+        ratio_threshold = 0.7
+        data = data.sort_index()
         first_year_ratio = 1 - \
             (data.index[0].dayofyear - 1) / \
             days_in_year(data.index[0].year)
         last_year_ratio = data.index[-1].dayofyear / \
             days_in_year(data.index[-1].year)
-        total_year = data.index[-1].year - data.index[0].year - 1 +\
-            first_year_ratio + last_year_ratio
+        if min([first_year_ratio, last_year_ratio]) < ratio_threshold:
+            warnings.warn('Missing to much data in the first or last year '
+                'might affect accuracy')
 
-        self.total_year = total_year
+        self.total_year = data.index[-1].year - data.index[0].year - 1 +\
+            first_year_ratio + last_year_ratio
         idx_valid = ~np.isnan(data.values)
         self.data = data.values[idx_valid]
-        self.year = np.array(data.index.year)[idx_valid]
-
-        if np.any(np.diff(self.year) < 0):
-            raise AttributeError('year should be in ascending order')
-
+        self.time = data.index[idx_valid]
         if sample_coor is None:
-            # Default value: starts from 0.5 * minima, ends at 1.5 * maxima, 1000 samples
             self.sample_coor = np.linspace(
                 self.data.min() * 0.5, self.data.max() * 1.5, 1000)
         else:
             self.sample_coor = sample_coor
+        self.notebook_backend = matplotlib.get_backend() \
+            in ['module://ipykernel.pylab.backend_inline']
 
-        # Discard first or end year if missing too much
-        ratio_threshold = 0.7
-        if first_year_ratio < ratio_threshold:
-            idx_valid = self.year != self.year[0]
-            self.data = self.data[idx_valid]
-            self.year = self.year[idx_valid]
-            self.total_year -= 1
-        if last_year_ratio < ratio_threshold:
-            idx_valid = self.year != self.year[-1]
-            self.data = self.data[idx_valid]
-            self.year = self.year[idx_valid]
-            self.total_year -= 1
-
-        self.notebook_backend = matplotlib.get_backend(
-        ) in ['module://ipykernel.pylab.backend_inline']
-
-    def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', method_bulk='Empirical',
-            outlier_detect=False, verbose=True):
-        ''' Fit a univirate distribution using the bulk and tail of the data respectively
-            The bulk fitting is controled by method_bulk
-            The tail fitting is converted from the result of the maxima subset using Extreme Value Theory 
-            The conversion is achieved through fitting MRP ratio
+    def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', 
+            bulk_fit='Empirical', outlier_detect=False, verbose=False):
+        ''' Fit a univirate distribution for the bulk and tail of the data
             Parameters:
             -----------
-                method_maxima: Currently only 'Annual' is supported, which is to use annual maxima
-                method_tail: Currently only 'GumbelChart' is supported, which is to fit the annual maxima 
-                    using Gumbel chart
-                method_bulk: Either 'Empirical' or 'BestFit'
-                    'Empirical' is to use the empirical CDF
-                    'BestFit' is to choose the best fitting distribution from a set of candidates using chi-square
-                outlier_detect: bool. Whether to assume outliers when fitting annual maxima using Gumbel chart
+                maxima_extract: How to extract independent maxima subset.
+                    Currently 'Annual' is supported, which is annual maxima.
+                maxima_fit: How to fit a distribution to the extracted maxima. 
+                    Currently 'GumbelChart' is supported
+                bulk_fit: How to fit a distribution to the bulk of the data.
+                    'Empirical': Use the empirical CDF
+                    'BestFit': Choose the best fitting distribution 
+                outlier_detect: bool. Whether to assume outliers when fitting 
+                    maxima data
                 verbose: bool. Whether to print progress
         '''
         total_steps = 3
-        fig = plt.figure(figsize=(16, 8), tight_layout=True)
+        self.diag_fig = plt.figure(figsize=(16, 8), tight_layout=True)
 
         # Fit bulk
         if verbose:
             print(f'Step 1/{total_steps}: Fitting bulk of the data')
-        if method_bulk == 'Empirical':
+        if bulk_fit == 'Empirical':
             self._bulk_empirical_fit()
-        elif method_bulk == 'BestFit':
+        elif bulk_fit == 'BestFit':
             self._bulk_best_fit(verbose)
         else:
             raise AttributeError(
@@ -105,71 +106,32 @@ class Univariate:
         # Fit right tail
         if verbose:
             print(f'Step 2/{total_steps}: Fitting right tail')
-        tail_right = _TailExtrapolation(self, fig_handle=fig)
+        tail_right = _TailExtrapolation(self, fig_handle=self.diag_fig)
         tail_right.fit(maxima_extract=maxima_extract,
                        maxima_fit=maxima_fit, outlier_detect=outlier_detect)
 
         # Fit left tail
         if verbose:
             print(f'Step 3/{total_steps}: Fitting left tail')
-        tail_left = _TailExtrapolation(self, left_tail=True, fig_handle=fig)
+        tail_left = _TailExtrapolation(
+            self, left_tail=True, fig_handle=self.diag_fig)
         with np.errstate(over='ignore'):
             tail_left.fit(maxima_extract=maxima_extract,
                           maxima_fit=maxima_fit, outlier_detect=outlier_detect)
 
         # Arrange diagnostic plot
-        fig.axes[0].change_geometry(2, 4, 1)
-        fig.axes[2].change_geometry(2, 4, 2)
-        fig.axes[3].change_geometry(2, 4, 5)
-        fig.axes[5].change_geometry(2, 4, 6)
-        fig.axes[4].remove()
-        fig.axes[1].remove()
+        self.diag_fig.axes[0].change_geometry(2, 4, 1)
+        self.diag_fig.axes[2].change_geometry(2, 4, 2)
+        self.diag_fig.axes[3].change_geometry(2, 4, 5)
+        self.diag_fig.axes[5].change_geometry(2, 4, 6)
+        self.diag_fig.axes[4].remove()
+        self.diag_fig.axes[1].remove()
 
         # Combine tail and bulk
-        sample_F = np.copy(self.bulk_F)
-        idx_right_tail = self.sample_coor >= tail_right.threshold
-        sample_F[idx_right_tail] = tail_right.tail_F[idx_right_tail]
-        idx_left_tail = self.sample_coor <= -tail_left.threshold
-        sample_F[idx_left_tail] = 1 - tail_left.tail_F[idx_left_tail]
-        self.sample_F = sample_F
-        for attr in ['c_rate', 'm_rate']:
-            setattr(self, attr, getattr(tail_right, attr))
-        with np.errstate(divide='ignore'):
-            self.sample_mrp = 1 / self.c_rate / (1 - sample_F)
+        self._combine_bulk_tail(tail_right, tail_left)
 
-        # Diagnositc plot
-        plt.subplot(1, 4, (3, 4))
-        mrp_emp = 1 / self.c_rate / (
-            1 - Univariate._plotting_position(self.data, method='unbiased'))
-        plt.plot(mrp_emp, np.sort(self.data), '.', color=[0.6, 0.6, 0.6],
-                 markersize=8, label='Empirical')
-        plt.xscale('log')
-        idx_tail = (self.sample_coor >= tail_right.threshold) | (
-            self.sample_coor <= -tail_left.threshold)
-        sample_mrp_tail = np.copy(self.sample_mrp)
-        sample_mrp_tail[~idx_tail] = np.nan
-        plt.plot(sample_mrp_tail, self.sample_coor, 'b-', label='Tail fit')
-        xlm = list(plt.xlim())
-        xlm[1] = mrp_emp[-1] * 10 # Limit MRP to be 10 * data period
-        ylm = list(plt.ylim())
-        with np.errstate(invalid='ignore'):
-            ylm[1] = self.sample_coor[sample_mrp_tail < xlm[1]][-1] # Corresponding y
-        plt.plot(1 / self.c_rate / (1 - self.bulk_F), self.sample_coor, '--',
-                 color=[0, 0.5, 0])
-        plt.plot(1 / self.c_rate / (1 - self.bulk_F[~idx_tail]), self.sample_coor[~idx_tail], '-',
-                 color=[0, 0.5, 0], label='Bulk fit')
-        plt.plot(xlm, tail_right.threshold * np.array([1, 1]), 'k--')
-        plt.plot(xlm, -tail_left.threshold * np.array([1, 1]), 'k--')
-        plt.xlim(xlm)
-        plt.ylim(ylm)
-        plt.xlabel('Return period (year)')
-        plt.ylabel('X')
-        plt.title('Fitting result')
-        plt.grid(True, which='both')
-        plt.legend(loc='upper left')
-        self.diag_fig = fig
         if self.notebook_backend:
-            plt.close(fig)
+            plt.close(self.diag_fig)
 
     def predict(self, mrp=None, val=None):
         ''' Predict value given an MRP, or MRP given a value
@@ -179,10 +141,8 @@ class Univariate:
                 val: float, value of the variable
             Returns:
             --------
-                Value corresponding to MRP (if MRP is input), or MRP corresponding to val
-            Note:
-            -----
-                Only one of MRP and val should be provided
+                Value corresponding to MRP (if MRP is input), or MRP 
+                    corresponding to val
         '''
         if mrp is not None and val is None:  # MRP provided
             idx = np.isnan(self.sample_mrp)
@@ -211,7 +171,7 @@ class Univariate:
                 self.bulk_F: CDF corresponding to self.sample_coor
         '''
         x = np.sort(self.data)
-        F_emp = Univariate._plotting_position(x, method='unbiased')
+        F_emp = util.plotting_position(x, method='unbiased')
         if self.sample_coor[0] < x[0]:
             x = np.concatenate(([0], x))
             F_emp = np.concatenate(([0], F_emp))
@@ -219,52 +179,85 @@ class Univariate:
             x, F_emp, bounds_error=False)(self.sample_coor)
 
     def _bulk_best_fit(self, verbose):
-        ''' Fit bulk using optimal distribution (see best_fit for more information)
+        ''' Fit bulk using optimal distribution 
+                See best_fit for more information
             Variables added:
             ----------------
                 self.bulk_F: CDF corresponding to self.sample_coor
         '''
         ss = StandardScaler().fit(self.data.reshape(-1, 1))
         data_std = ss.transform(self.data.reshape(-1, 1)).flatten()
-        fit_df = Univariate.best_fit(data_std)
-        self.bulk_F = getattr(stats, fit_df.Distribution[0]).cdf(
-            ss.transform(self.sample_coor.reshape(-1, 1)),
-            *fit_df.param[0][:-2],
-            loc=fit_df.param[0][-2],
-            scale=fit_df.param[0][-1]).flatten()
+        dist, dist_name = util.best_fit(data_std)
+        self.bulk_F = dist.cdf(
+            ss.transform(self.sample_coor.reshape(-1, 1))).flatten()
         if verbose:
-            print(f'          Best fit distribution: {fit_df.Distribution[0]}')
+            print(f'          Best fit distribution: {dist_name}')
 
-    @staticmethod
-    def _plotting_position(data, method='unbiased'):
-        ''' Plotting position of data (with NaN discarded) '''
-        assert not np.any(np.isnan(data)), 'data should not include any NaN'
-        n = len(data)
-        if method == 'unbiased':
-            return ((np.arange(n) + 1) - 0.44) / (n + 0.12)
-        elif method == 'simple':
-            return (np.arange(n) + 1) / (n + 1)
-        else:
-            raise AttributeError(
-                'Unsupported calculation method for plotting position')
+    def _combine_bulk_tail(self, tail_right, tail_left):
+        ''' Combine bulk, tail_right, and tail_left 
+            Variables added:
+            ----------------
+                sample_F: CDF for self.sample_coor
+                sample_mrp: MRP for self.sample_coor
+        '''
+        sample_F = np.copy(self.bulk_F)
+        idx_right_tail = self.sample_coor >= tail_right.threshold
+        sample_F[idx_right_tail] = tail_right.tail_F[idx_right_tail]
+        idx_left_tail = self.sample_coor <= -tail_left.threshold
+        sample_F[idx_left_tail] = 1 - tail_left.tail_F[idx_left_tail]
+        self.sample_F = sample_F
+        for attr in ['c_rate', 'm_rate']:
+            setattr(self, attr, getattr(tail_right, attr))
+        with np.errstate(divide='ignore'):
+            self.sample_mrp = 1 / self.c_rate / (1 - sample_F)
 
+        # Diagnositc plot
+        ax = self.diag_fig.add_subplot(1, 4, (3, 4))
+        mrp_emp = 1 / self.c_rate / (
+            1 - util.plotting_position(self.data, method='unbiased'))
+        ax.plot(mrp_emp, np.sort(self.data), '.', color=[0.6, 0.6, 0.6],
+                 markersize=8, label='Empirical')
+        ax.set_xscale('log')
+        idx_tail = (self.sample_coor >= tail_right.threshold) | (
+            self.sample_coor <= -tail_left.threshold)
+        sample_mrp_tail = np.copy(self.sample_mrp)
+        sample_mrp_tail[~idx_tail] = np.nan
+        ax.plot(sample_mrp_tail, self.sample_coor, 'b-', label='Tail fit')
+        xlm = list(ax.get_xlim())
+        xlm[1] = mrp_emp[-1] * 10 # Limit MRP to be 10 * data period
+        ylm = list(ax.get_ylim())
+        with np.errstate(invalid='ignore'):
+            ylm[1] = self.sample_coor[sample_mrp_tail < xlm[1]][-1] # Corresponding y
+        ax.plot(1 / self.c_rate / (1 - self.bulk_F), self.sample_coor, '--',
+                 color=[0, 0.5, 0])
+        ax.plot(
+            1 / self.c_rate / (1 - self.bulk_F[~idx_tail]), 
+            self.sample_coor[~idx_tail], '-',
+            color=[0, 0.5, 0], label='Bulk fit')
+        ax.plot(xlm, tail_right.threshold * np.array([1, 1]), 'k--')
+        ax.plot(xlm, -tail_left.threshold * np.array([1, 1]), 'k--')
+        ax.set_xlim(xlm)
+        ax.set_ylim(ylm)
+        ax.set_xlabel('Return period (year)')
+        ax.set_ylabel('X')
+        ax.set_title('Fitting result')
+        ax.grid(True, which='both')
+        ax.legend(loc='upper left')
 
 class _TailExtrapolation:
     ''' Extrapolation the right tail of a distribution
         Parameters
         ----------
-            data: pandas series or numpy array. If constructing conditional distribution, 
-                NaN should be retained for total_year to be correctly inferred
-            year: numpy array with the same size as data. Ignored when data is pandas series
-            total_year: float. Ignored when data is pandas series
-            sample_coor: numpy array. Sample coordinate as a reference for outputs. 
-                Inferred from data if not provided
+            univariate_obj: Instance of Univariate class
+            left_tail: bool. Whether it's extrapolating the left tail
+            fig_handle: Figure handler for diagnosis plot
     '''
 
     def __init__(self, univariate_obj, left_tail=False, fig_handle=None):
-        for attr in ['data', 'year', 'total_year', 'sample_coor', 'bulk_F']:
+        for attr in ['data', 'time', 'total_year', 'sample_coor', 'bulk_F']:
             setattr(self, attr, getattr(univariate_obj, attr))
         if left_tail:
+            # Reverse data so that it becomes a maxima extrapolation
             self.data = -self.data
             self.sample_coor = -self.sample_coor
             self.bulk_F = 1 - self.bulk_F
@@ -276,7 +269,8 @@ class _TailExtrapolation:
         else:
             self.diag_fig = fig_handle
 
-    def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', outlier_detect=False):
+    def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', 
+            outlier_detect=False):
         # Extract maxima (sorted, no NaN)
         if maxima_extract == 'Annual':
             self._extract_annual_maxima()
@@ -299,10 +293,11 @@ class _TailExtrapolation:
             ----------------
                 self.maxima: numpy array in ascending order
         '''
-        unique_year = np.unique(self.year)
+        year = np.array(self.time.year)
+        unique_year = np.unique(year)
         result = []
-        for year in unique_year:
-            result.append(max(self.data[self.year == year]))
+        for cur_year in unique_year:
+            result.append(max(self.data[year == cur_year]))
         self.maxima = np.sort(result)
 
     def _fit_gumbel_chart(self, outlier_detect: bool, plot_diagnosis: bool):
@@ -311,8 +306,8 @@ class _TailExtrapolation:
             ----------------
                 self.maxima_inlier_mask: Mask indicating inliers
                 self.maxima_dist: Probability distribution for the maxima
-                self.threshold: Threshold of X between bulk and tail, minimum value is 
-                    constrained to be no lower than 5 percentile of F_maxima
+                self.threshold: Threshold of X between bulk and tail, minimum 
+                    is constrained to be no lower than 5 percentile of F_maxima
             Parameters:
             -----------
                 outlier_detect: Whether to assume the existance of outliers. 
@@ -324,7 +319,7 @@ class _TailExtrapolation:
             return -np.log(-np.log(F))
 
         x = self.maxima
-        F = Univariate._plotting_position(x, method='unbiased')
+        F = util.plotting_position(x, method='unbiased')
         y = _gumbel_y(F)
         if outlier_detect:
             # ToDo: Test different model on condY for dataset ABC
@@ -350,8 +345,9 @@ class _TailExtrapolation:
             ax.plot(x[~self.maxima_inlier_mask], y[~self.maxima_inlier_mask],
                     'r.', markersize=10, label='Maxima(outliers)')
             xlm, ylm = ax.get_xlim(), ax.get_ylim()
-            ax.plot(self.sample_coor, mdl.predict(self.sample_coor.reshape(-1, 1)),
-                    'r--', label='Linear fitting')
+            ax.plot(
+                self.sample_coor, mdl.predict(self.sample_coor.reshape(-1, 1)),
+                'r--', label='Linear fitting')
             ax.set_xlim(xlm)
             ax.set_ylim(ylm)
             ax.set_xlabel('Maxima data')
@@ -372,9 +368,9 @@ class _TailExtrapolation:
         c_rate = len(c_data) / self.total_year
         m_rate = len(m_data) / self.total_year
         c_mrp_emp = 1 / c_rate / \
-            (1 - Univariate._plotting_position(c_data, method='unbiased'))
+            (1 - util.plotting_position(c_data, method='unbiased'))
         m_mrp_emp = 1 / m_rate / \
-            (1 - Univariate._plotting_position(m_data, method='unbiased'))
+            (1 - util.plotting_position(m_data, method='unbiased'))
 
         # Calculate empirical MRP ratio
         mrp_ratio_emp = m_mrp_emp / interp1d(c_data, c_mrp_emp)(m_data)
@@ -466,17 +462,7 @@ if __name__ == '__main__':
     import pickle
     with open('../datasets/D.pkl', 'rb') as f:
         df = pickle.load(f)
-    # df = pd.read_csv('../datasets/D.txt', sep=';', index_col=0, parse_dates=True)
-
-    # test = Univariate(df.iloc[:, 0])
-    # test.fit()
-    # test.plot_diagnosis()
-
-    # x_dist = Univariate(df.iloc[:, 0])
-    # x_dist.fit()
-    # x_dist.plot_diagnosis()
-    # print(dir(te))
-
-    # Test for Multivariate class
-    test = Multivariate(df, condY_x=np.arange(1, 22))
-    test.fit()
+    data = df.iloc[:, 0]
+    urv = Univariate(data, sample_coor=np.linspace(0, 2*data.max(), 1000))
+    urv.fit(outlier_detect=True)
+    urv.plot_diagnosis()
