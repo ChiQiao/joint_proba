@@ -10,11 +10,11 @@ dependencies:
 - scipy
 - pandas
 - numpy
-- matplotlib
+- matplotlib=3.1.1
 - pip:
   - autopep8
   - pylint
   - rope
   - jupyter_contrib_nbextensions
-  - scikit-learn
-  - streamlit
+  - scikit-learn=0.22.1
+  - streamlit=0.53.0
