@@ -22,7 +22,10 @@ class Univariate:
         This Univariate class applies Extreme Value Theory to the independent
             subset, and then convert the extrapolation result to the original
             dataset using MRP ratio curve. 
-        Methods include fit, predict, and plot_diagnosis.
+        Methods include fit, predict, and plot_diagnosis. During the fitting, 
+            the distribution is estimated separately for the left tail, bulk, 
+            and the right tail, and then combined together. Left and right tails 
+            are extrapolated through the _TailExtrapolation class.
         Parameters
         ----------
             data: pandas series with datetime index. If constructing conditional 
@@ -245,7 +248,7 @@ class Univariate:
         ax.legend(loc='upper left')
 
 class _TailExtrapolation:
-    ''' Extrapolation the right tail of a distribution
+    ''' Extrapolation the tail of a distribution.
         Parameters
         ----------
             univariate_obj: Instance of Univariate class
@@ -271,6 +274,17 @@ class _TailExtrapolation:
 
     def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', 
             outlier_detect=False):
+        '''Fit EVT tail, MRP ratio, then convert the EVT tail to raw data
+        
+        Parameters
+        ----------
+        maxima_extract : str, optional
+            Method to extract independent maxima subset, by default 'Annual'
+        maxima_fit : str, optional
+            Method to fit maxima subset, by default 'GumbelChart'
+        outlier_detect : bool, optional
+            Whether to assume outliers in the maxima subset, by default False
+        '''
         # Extract maxima (sorted, no NaN)
         if maxima_extract == 'Annual':
             self._extract_annual_maxima()
@@ -287,32 +301,34 @@ class _TailExtrapolation:
         # Fitting tail
         self._maxima_to_continuous(plot_diagnosis=True)
 
-    def _extract_annual_maxima(self) -> None:
-        ''' Extract annual maxima 
-            Variables added:
-            ----------------
-                self.maxima: numpy array in ascending order
+    def _extract_annual_maxima(self):
+        '''Extract annual maxima 
+
+        Variables added
+        ---------------
+            self.maxima : numpy array in ascending order
         '''
         year = np.array(self.time.year)
         unique_year = np.unique(year)
-        result = []
-        for cur_year in unique_year:
-            result.append(max(self.data[year == cur_year]))
+        result = [max(self.data[year == cur_year]) for cur_year in year]
         self.maxima = np.sort(result)
 
     def _fit_gumbel_chart(self, outlier_detect: bool, plot_diagnosis: bool):
-        ''' Fit a Gumbel distribution fit via Gumbel chart 
-            Variables added:
-            ----------------
-                self.maxima_inlier_mask: Mask indicating inliers
-                self.maxima_dist: Probability distribution for the maxima
-                self.threshold: Threshold of X between bulk and tail, minimum 
-                    is constrained to be no lower than 5 percentile of F_maxima
-            Parameters:
-            -----------
-                outlier_detect: Whether to assume the existance of outliers. 
-                    Use OLS when False
-                plot_diagnosis: Whether to generate diagnostic plot
+        '''Fit a Gumbel distribution fit via Gumbel chart 
+
+        Parameters
+        ----------
+            outlier_detect : bool
+                Whether to assume outliers. Use OLS when False.
+            plot_diagnosis: bool
+                Whether to generate diagnostic plot.
+
+        Variables added
+        ---------------
+            self.maxima_inlier_mask: Mask indicating inliers
+            self.maxima_dist: Probability distribution for the maxima
+            self.threshold: Threshold of X between bulk and tail, minimum 
+                is constrained to be no lower than 5 percentile of F_maxima
         '''
         def _gumbel_y(F):
             ''' Calculate y coordinates on the Gumbel chart from CDF '''
@@ -322,16 +338,16 @@ class _TailExtrapolation:
         F = util.plotting_position(x, method='unbiased')
         y = _gumbel_y(F)
         if outlier_detect:
-            # ToDo: Test different model on condY for dataset ABC
+            # TODO: Test different model on condY for dataset ABC
             mdl = linear_model.RANSACRegressor(
                 random_state=1).fit(x.reshape(-1, 1), y)
             self.maxima_inlier_mask = mdl.inlier_mask_
             mdl = mdl.estimator_
 
-#             mdl = linear_model.HuberRegressor(
-#                 epsilon=1.35).fit(x.reshape(-1, 1), y)
-#             self.maxima_inlier_mask = np.array(
-#                 [True] * len(self.maxima))  # Create mask manually
+            # mdl = linear_model.HuberRegressor(
+            #     epsilon=1.35).fit(x.reshape(-1, 1), y)
+            # self.maxima_inlier_mask = np.array(
+            #     [True] * len(self.maxima))  # Create mask manually
         else:
             mdl = linear_model.LinearRegression().fit(x.reshape(-1, 1), y)
             self.maxima_inlier_mask = np.array(
@@ -362,6 +378,23 @@ class _TailExtrapolation:
         self.threshold = self.maxima[self.maxima_inlier_mask].min()
 
     def _maxima_to_continuous(self, plot_diagnosis: bool):
+        '''Convert the EVT tail to the continuous dataset
+        
+        Parameters
+        ----------
+        plot_diagnosis : bool
+            Whether to generate diagnostic plot
+        
+        Variables added
+        ---------------
+        self.m_rate : float
+            Annual occurrence rate of the maxima data
+        self.c_rate : float
+            Annual occurrence rate of the continuous data
+        self.tail_F : numpy array
+            CDF of the tail of the continuous dataset. The part below
+            self.threshold is set to be np.nan
+        '''
         # Calculate empirical MRP for continuous and maxima datasets
         c_data = np.sort(self.data)
         m_data = self.maxima

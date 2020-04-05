@@ -137,4 +137,4 @@ def plotting_position(data, method='unbiased'):
 if __name__ == '__main__':
     from scipy.stats import weibull_min
     r = weibull_min.rvs(2, size=1000)
-    dist, fit_df = best_fit(r, criteria='r2', qq_plot=True)
+    dist, dist_name, fit_df = best_fit(r, criteria='r2', qq_plot=True)
