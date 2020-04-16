@@ -1,4 +1,4 @@
-name: pyEC
+name: temp
 channels:
 - defaults
 - conda-forge
@@ -16,5 +16,5 @@ dependencies:
   - pylint
   - rope
   - jupyter_contrib_nbextensions
-  - scikit-learn=0.22.1
-  - streamlit=0.53.0
+  - scikit-learn==0.22.1
+  - streamlit==0.57
