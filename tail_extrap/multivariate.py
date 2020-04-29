@@ -4,6 +4,7 @@ import warnings
 from functools import partial
 
 import ipywidgets as widgets
+from IPython.display import display
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,7 +13,18 @@ from scipy import stats
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit, minimize
 
-from tail_extrap.univariate import Univariate
+from tail_extrap import univariate 
+from tail_extrap import util
+
+font_size = 14
+plt.rc('font', size=font_size)
+plt.rc('axes', titlesize=font_size)
+plt.rc('axes', labelsize=font_size)
+plt.rc('xtick', labelsize=font_size)
+plt.rc('ytick', labelsize=font_size)
+plt.rc('legend', fontsize=font_size)
+plt.rc('figure', titlesize=font_size)
+
 
 class Multivariate:
     ''' Tail extrapolation of multi-variable as a paired time series, resulting
@@ -66,7 +78,7 @@ class Multivariate:
         self.dist_cands = dist_cands
         self.dist_config = dist_config
 
-    def fit(self, plot_diagnosis=True, verbose=True):
+    def fit(self, verbose=True):
         '''Fit results that are independent from MRP 
 
         Variables added:
@@ -76,31 +88,37 @@ class Multivariate:
             self.condYs_bulk: list of instances of _CondY class 
                 Candidates of condY fitting results using the bulk of the data
         '''
+        total_step = 5
+
         # Fit marginal X
         if verbose:
-            print('Fitting marginal X')
+            print(f'Step 1/{total_step}: Fitting marginal X')
         self._fit_marginalX()
 
         # Fit marginal Y
         if verbose:
-            print('Fitting marginal Y')
+            print(f'Step 2/{total_step}: Fitting marginal Y')
         self._fit_marginalY()
 
         # Fit discrete conditional Y
         if verbose:
-            print('Fitting discrete conditional Y')
+            print(f'Step 3/{total_step}: Fitting discrete conditional Y')
         self._fit_condY_disc()
 
         # Median of condY
+        if verbose:
+            print(f'Step 4/{total_step}: '
+                'Fitting median of conditional Y')
         self._get_condY_median()
 
         # Fit the parameters of conditional Y using bulk of the data
         if verbose:
-            print('Fitting continuous conditional Y using bulk')
+            print(f'Step 5/{total_step}: '
+                'Fitting continuous conditional Y using bulk')
         df = self._get_condY_para_bulk()
         self.condY_cont_dists_bulk = self._fit_condY_cont(df)
 
-    def predict(self, mrp, range_ratio=10):
+    def predict(self, mrp, range_ratio=10, verbose=True):
         '''Re-parameterize tail based on MRP and construct environmental contour 
         
         Parameters:
@@ -108,80 +126,226 @@ class Multivariate:
             MRP: numpy array. Target MRP
         '''
         ct = {'mrp': mrp}
+        total_step = 5
 
         # MRP of independent X & Y 
+        if verbose:
+            print(f'Step 1/{total_step}: '
+                'Calculating marginal MRP value for X & Y')
         ct['x_mrp'] = self.x_dist.predict(mrp=mrp)
         ct['y_mrp'] = self.y_dist.predict(mrp=mrp)
 
         # Jagged contour
+        if verbose:
+            print(f'Step 2/{total_step}: Calculating jagged contour')
         ct['jagged'] = self._get_jaggaed_contour(mrp)
 
         # Smooth contour (lower part)
+        if verbose:
+            print(f'Step 3/{total_step}: '
+                'Calculating lower contour with MLE fitting')
         ct['lower'], ct['df_lower'] = self._smooth_contour_lower(ct)
 
         # Smooth contour (upper part)
-        ct['upper'], ct['df_upper'] = self._smooth_contour_upper(
-            ct, range_ratio=range_ratio)
+        if verbose:
+            print(f'Step 4/{total_step}: '
+                'Calculating upper contour with reparameterization')
+        ct['upper'], ct['df_upper'], ct['condY_cont_dists_tail'] = \
+            self._smooth_contour_upper(ct, range_ratio=range_ratio)
 
         # Combine contour
+        if verbose:
+            print(f'Step 5/{total_step}: Combining final contour')
         ct['final_x'], ct['final_y'] = self._smooth_contour_combine(ct)
 
         return ct
 
-    def plot_diagnosis(self):
-        def plot_dist_diagnosis():
-            if ' ' in dropdown_dist.value:  # contains list index
-                attr_name, idx = dropdown_dist.value.split(sep=' ')
-                dist = getattr(self, attr_name)[int(idx)]
+    def plot_diagnosis(self, ct):
+        def update_uni_diag(change=None):
+            if uni_dropdown.value == 'condY_disc_dists':
+                uni_slider.layout.visibility = 'visible'
+                dist = getattr(self, uni_dropdown.value)[uni_slider_dict[uni_slider.value]]
             else:
-                dist = getattr(self, dropdown_dist.value)
-            display(dist.diag_fig)
+                uni_slider.layout.visibility = 'hidden'
+                dist = getattr(self, uni_dropdown.value)
 
-        def update_dist_plot(change):
-            dist_display.clear_output(wait=True)
-            with dist_display:
-                plot_dist_diagnosis()
+            uni_display.clear_output(wait=True)
+            with uni_display:
+                display(dist.diag_fig)
+                
+        def plot_validations():
+            plt.plot(self.x_data, self.y_data, '.', color=[0.5, 0.5, 0.5], alpha=0.1,  markersize=10)
+            plt.plot(ct['jagged']['x'], ct['jagged']['y_bot'], 'b.-')
+            plt.plot(ct['jagged']['x'], ct['jagged']['y_top'], 'b.-')
+            plt.plot([ct['x_mrp'], ct['x_mrp']], [0, ct['y_mrp']], 'b--')
+            plt.plot([0, ct['x_mrp']], [ct['y_mrp'], ct['y_mrp']], 'b--')
+            plt.plot(self.x_dist.sample_coor, self.median_pred, 'b-.')
+            plt.grid(True)
+            plt.xlim([0, ct['x_mrp'] * 1.1])
+            plt.ylim([
+                0, 1.1 * max([ct['y_mrp'], ct['jagged']['y_top'].max()])
+            ])
+            plt.xlabel(self.x_name)
+            plt.ylabel(self.y_name)
+
+        def update_lower_contour_diag(change=None):
+            cur_dist_name = lower_dist_selection.value
+            lower_dist_err.value = 'RMS error compared to the jagged lower ' \
+                f"contour: {ct['df_lower'].loc[cur_dist_name, 'err']:.2f}"
+
+            lower_para_plot.clear_output(wait=True)
+            with lower_para_plot:
+                self.condY_cont_dists_bulk[cur_dist_name].plot_diagnosis()
+                plt.title('')
+                plt.xlabel(self.x_name)
+                plt.show()
+
+            lower_contour_plot.clear_output(wait=True)
+            with lower_contour_plot:
+                plot_validations()
+                plt.plot(
+                    self.x_dist.sample_coor, 
+                    ct['df_lower'].loc[lower_dist_selection.value, 'y_bot'],
+                    'r-', LineWidth=2)
+                plt.show()
+        
+        def update_upper_contour_diag(change=None):
+            cur_dist_name = upper_dist_selection.value
+            upper_dist_err.value = 'Overall error: ' \
+                f"{ct['df_upper'].loc[cur_dist_name, 'err']:.2f};  " \
+                r'(25% RMS error compared to the jagged upper contour ' +\
+                r'+ 75% absolute error compared to MRP of marginal y)'
+
+            upper_repara_plot.clear_output(wait=True)
+            with upper_repara_plot:
+                self.plot_repara_result(ct, cur_dist_name)
+
+            upper_para_plot.clear_output(wait=True)
+            with upper_para_plot:
+                ct['condY_cont_dists_tail'][cur_dist_name].plot_diagnosis()
+                plt.title('')
+                plt.xlabel(self.x_name)
+                plt.show()
+
+            upper_contour_plot.clear_output(wait=True)
+            with upper_contour_plot:
+                plot_validations()
+                plt.plot(
+                    self.x_dist.sample_coor, 
+                    ct['df_upper'].loc[upper_dist_selection.value, 'y_top'],
+                    'r-', LineWidth=2)
                 plt.show()
 
         # Tab 1: Univirate fitting
-        dropdown_options = [('Marginal X', 'x_dist'), ('Marginal Y', 'y_dist')] +\
-            [('Conditional Y at X={:.1f}'.format(condY_x), 'condY_disc_dists {}'.format(idx))
-             for idx, condY_x in enumerate(self.condY_x)]
-        dropdown_dist = widgets.Dropdown(
-            options=dropdown_options, description='Item')
-        dropdown_dist.observe(update_dist_plot, names="value")
-        dist_display = widgets.Output()
-        with dist_display:
-            plot_dist_diagnosis()
+
+        uni_dropdown = widgets.Dropdown(
+            options=[
+                ('Marginal X', 'x_dist'), 
+                ('Marginal Y', 'y_dist'),
+                ('Conditional Y', 'condY_disc_dists')], 
+            description='Item')
+        uni_slider_dict = {f'{condY_x:.1f}': idx 
+            for idx, condY_x in enumerate(self.condY_x)}
+        uni_slider = widgets.SelectionSlider(
+            options=uni_slider_dict.keys(),
+            description='at x = ',
+            continuous_update=False,
+            readout=True,
+            layout=widgets.Layout(width='50%')
+        )
+        uni_display = widgets.Output()
+        update_uni_diag()
+        uni_dropdown.observe(update_uni_diag, names="value")
+        uni_slider.observe(update_uni_diag, names="value")
+        tab1 = widgets.VBox(children=[uni_dropdown, uni_slider, uni_display])
+
+        # Tab 2: Lower contour fitting
+        lower_dist_names = list(ct['df_lower'].index)
+        lower_dist_selection = widgets.SelectionSlider(
+            options=lower_dist_names,
+            description='Distribution: ',
+            continuous_update=False,
+            readout=True,
+            layout=widgets.Layout(width='50%')
+        )
+        lower_dist_err = widgets.Label()
+        lower_para_plot = widgets.Output(layout=widgets.Layout(width='50%'))
+        lower_contour_plot = widgets.Output(layout=widgets.Layout(width='50%'))
+        update_lower_contour_diag()
+        lower_dist_selection.observe(update_lower_contour_diag, names='value')
+        tab2 = widgets.VBox(
+            children=[
+                lower_dist_selection,
+                widgets.Label(f'Optimal distribution: {lower_dist_names[0]}'),
+                lower_dist_err,
+                widgets.HBox(
+                    children=[lower_para_plot, lower_contour_plot])
+            ]
+        )
+
+        # Tab 3: Upper contour fitting
+
+        upper_dist_names = list(ct['df_upper'].index)
+        upper_dist_selection = widgets.SelectionSlider(
+            options=upper_dist_names,
+            description='Distribution: ',
+            continuous_update=False,
+            readout=True,
+            layout=widgets.Layout(width='50%')
+        )
+        upper_dist_err = widgets.Label()
+        upper_repara_plot = widgets.Output(layout=widgets.Layout(width='33%'))
+        upper_para_plot = widgets.Output(layout=widgets.Layout(width='33%'))
+        upper_contour_plot = widgets.Output(layout=widgets.Layout(width='33%'))
+        update_upper_contour_diag()
+        upper_dist_selection.observe(update_upper_contour_diag, names='value')
+        tab3 = widgets.VBox(
+            children=[
+                upper_dist_selection,
+                widgets.Label(f'Optimal distribution: {upper_dist_names[0]}'),
+                upper_dist_err,
+                widgets.HBox(
+                    children=[
+                        upper_repara_plot, 
+                        upper_para_plot, 
+                        upper_contour_plot])
+            ]
+        )
+
+        # Tab 4: Multivirate fitting
+
+        contour_display = widgets.Output()
+        with contour_display:
+            plot_validations()
+            plt.plot(self.x_dist.sample_coor, ct['lower'], 'b--')
+            plt.plot(self.x_dist.sample_coor, ct['upper'], 'b--')
+            plt.plot(ct['final_x'], ct['final_y'], 'r-', LineWidth=2)            
             plt.show()
-        tab1 = widgets.VBox(children=[dropdown_dist, dist_display])
+        tab4 = contour_display
 
-        # Tab 2: Multivirate fitting
-        tab2 = widgets.VBox(children=[])
+        # Overall layout
 
-        tab = widgets.Tab(children=[tab1, tab2])
+        tab = widgets.Tab(children=[tab1, tab2, tab3, tab4])
         tab.set_title(0, 'Univariate fitting')
-        tab.set_title(1, 'Multivariate fitting')
-        return widgets.VBox(children=[tab])
+        tab.set_title(1, 'Lower contour')
+        tab.set_title(2, 'Upper contour')
+        tab.set_title(3, 'Final result')
+        display(tab)
         
-    @staticmethod
-    def plot_repara_result(df, condY_x, dist_name):
-        fit_coor = df['fit_coor'][dist_name]
-        mrp_true = df['mrp_true'][dist_name]
-        mrp_pred = df['mrp_pred'][dist_name]
-        para = df['param'][dist_name]
+    def plot_repara_result(self, ct, dist_name):
+        fit_coor = ct['df_upper']['fit_coor'][dist_name]
+        mrp_true = ct['df_upper']['mrp_true'][dist_name]
+        mrp_pred = ct['df_upper']['mrp_pred'][dist_name]
+        para = ct['df_upper']['param'][dist_name]
 
-        plt.figure(figsize=(16, 8))
-        plt.subplot(1, 2, 1)
-        for y, true, pred, x in zip(fit_coor, mrp_true, mrp_pred, condY_x):
+        plt.figure()
+        for y, true, pred, x in zip(fit_coor, mrp_true, mrp_pred, self.condY_x):
             h = plt.plot(true, y, '-', label=x)
             plt.plot(pred, y, '--', color=h[0].get_color())
         plt.xscale('log')
         plt.grid(True)
-
-        plt.subplot(1, 2, 2)
-        plt.plot(condY_x, para)
-        plt.grid(True)
+        plt.xlabel('Mean Return Period (yr)')
+        plt.ylabel(self.x_name)
         plt.show()
     
     def _fit_marginalX(self, **kwargs):
@@ -190,7 +354,7 @@ class Multivariate:
             ----------------
                 self.x_dist: Univariate object
         '''
-        x_dist = Univariate(
+        x_dist = univariate.Univariate(
             self.x_data,
             sample_coor=np.linspace(0, 2*self.x_data.max(), 1000))
         x_dist.fit(verbose=False, **kwargs)
@@ -202,7 +366,7 @@ class Multivariate:
             ----------------
                 self.y_dist: Univariate object
         '''
-        y_dist = Univariate(
+        y_dist = univariate.Univariate(
             self.y_data,
             sample_coor=np.linspace(0, 2*self.y_data.max(), 1000))
         y_dist.fit(verbose=False, **kwargs)
@@ -220,14 +384,15 @@ class Multivariate:
         condY_disc_dists = []
         condY_dx = np.diff(self.condY_x).mean()
         for cur_x in self.condY_x:
+            # print(cur_x)
             condY_data = self.y_data.copy()
             condY_data[
                 (self.x_data < cur_x - condY_dx) |
                 (self.x_data > cur_x + condY_dx)
             ] = np.nan
-            cur_dist = Univariate(
+            cur_dist = univariate.Univariate(
                 condY_data,
-                sample_coor=np.linspace(0, 2*self.x_data.max(), 1000)
+                sample_coor=np.linspace(0, 2*condY_data.max(), 1000)
             )
             cur_dist.fit(verbose=False, **kwargs)
             condY_disc_dists.append(cur_dist)
@@ -243,9 +408,9 @@ class Multivariate:
                 dist_conf: dict of dist. fitting configuration
             Returns:
             ----------------
-                condY_cont_dists: list of _CondY objects
+                condY_cont_dists: dict of _CondY objects with dist_name as key
         '''
-        condY_cont_dists = []
+        condY_cont_dists = {}
         for idx in range(len(df)):
             params = df['param'][idx]
             idx_valid = ~np.isnan(params).any(axis=1)
@@ -256,7 +421,7 @@ class Multivariate:
                 dist_config=self.dist_config[df.index[idx]]
             )
             condY.fit()
-            condY_cont_dists.append(condY)
+            condY_cont_dists[condY.dist_name] = condY
         return condY_cont_dists
 
     def _get_condY_median(self):
@@ -310,7 +475,7 @@ class Multivariate:
         df_temp = pd.DataFrame()
         for condY_dist in self.condY_disc_dists:
             data = condY_dist.data
-            df_cur = Univariate.best_fit(
+            _, _, df_cur = util.best_fit(
                 data, dist_names=self.dist_cands, dist_config=self.dist_config)
             df_temp = pd.concat(
                 [df_temp, df_cur.set_index('Distribution')], axis=1)
@@ -320,7 +485,7 @@ class Multivariate:
         # param: stack for different condY_x
         df = pd.concat(
             [
-                df_temp['chi_square'].mean(axis=1, skipna=False),
+                df_temp['chi-square'].mean(axis=1, skipna=False),
                 df_temp['r2'].mean(axis=1, skipna=False),
                 df_temp['param'].apply(np.vstack, axis=1),
             ], axis=1
@@ -513,7 +678,7 @@ class Multivariate:
         
         # Construct contours
         contours_tail = {}
-        for condY in condY_cont_dists_tail:
+        for _, condY in condY_cont_dists_tail.items():
             res = self._get_smooth_contour(condY, ct['mrp'])
             dist_name = res.pop('dist_name')
             contours_tail[dist_name] = res
@@ -538,10 +703,13 @@ class Multivariate:
         df_diag['err'] = df_diag.apply(
             lambda x: 0.25*x['err_emp'] + 0.75*x['err_apex'], axis=1)
 
-        # Select the best contour
+        # Arrange df_diag
         df_diag = df_diag.sort_values('err')
+        df_diag = df_diag[df_diag['err'] < df_diag['err'][0] * 20]
+
+        # Select the best contour
         contour_upper = df_diag['y_top'][0]
-        return contour_upper, df_diag
+        return contour_upper, df_diag, condY_cont_dists_tail
 
     def _smooth_contour_lower(self, ct):
         ''' Get lower part of the smooth contour using MLE fitting 
@@ -552,7 +720,7 @@ class Multivariate:
         '''
         # Get contour candidates from self.condY_cont_dists_bulk
         contours_bulk = {}
-        for condY in self.condY_cont_dists_bulk:
+        for _, condY in self.condY_cont_dists_bulk.items():
             res = self._get_smooth_contour(condY, ct['mrp'])
             dist_name = res.pop('dist_name')
             contours_bulk[dist_name] = res
@@ -574,10 +742,11 @@ class Multivariate:
         return contour_lower, df_diag
 
     def _smooth_contour_combine(self, ct):
-        x_start = max([
-            self.condY_x.max(), 
-            self.x_dist.sample_coor[np.nanargmax(ct['upper'])]
-        ])
+        # x_start = max([
+        #     self.condY_x.max(), 
+        #     self.x_dist.sample_coor[np.nanargmax(ct['upper'])]
+        # ])
+        x_start = self.x_dist.sample_coor[np.nanargmax(ct['upper'])]
         idx_adj = (self.x_dist.sample_coor >= x_start) & \
             (self.x_dist.sample_coor <= ct['x_mrp'])
         x_adj = self.x_dist.sample_coor[idx_adj]
@@ -585,7 +754,7 @@ class Multivariate:
         # Upper part
         upper_adj = ct['upper'][idx_adj]
         upper_max = upper_adj[0]
-        upper_temp = (upper_max - upper_adj)
+        upper_temp = upper_max - upper_adj
         ratio = (upper_max - self.median_pred[idx_adj][-1]) / upper_temp[-1]
         upper_temp *= ratio
         # In case the median gives higher result than the apex
@@ -672,7 +841,7 @@ class _CondY:
             else:
                 popt, _ = curve_fit(
                     fitting_func, self.x, param_raw, method='trf',
-                    bounds=(coef_lb[param_lb], np.inf), max_nfev=1e4
+                    bounds=(coef_lb[param_lb], np.inf), max_nfev=1e5
                 )
                 coef_func.append(
                     partial(fitting_func, a=popt[0], b=popt[1], c=popt[2]))
@@ -705,14 +874,16 @@ class _CondY:
         plt.title(self.dist_name)
         plt.grid(True)
         plt.legend(loc='best')
-        plt.show()
+        # plt.show()
 
 
 if __name__ == '__main__':
     import pickle
     dirname = os.path.dirname(__file__)
-    data_path = os.path.join(dirname, '../datasets/D.pkl')
+    data_path = os.path.join(dirname, '../datasets/A.pkl')
     with open(data_path, 'rb') as f:
         df = pickle.load(f)
 
-    mv = Multivariate(df)
+    self = Multivariate(df, condY_x=np.arange(0.3, 5, 0.3))
+    self.fit()
+    self.predict(mrp=1)
