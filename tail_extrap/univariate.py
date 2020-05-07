@@ -77,36 +77,36 @@ class Univariate:
         self.notebook_backend = matplotlib.get_backend() \
             in ['module://ipykernel.pylab.backend_inline']
 
-    def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', 
+    def fit(self, maxima_extract='Annual Maxima', maxima_fit='Gumbel Chart', 
             bulk_fit='Empirical', outlier_detect=None, verbose=False):
         '''Fit a univirate distribution for the bulk and tail of the data
         Parameters:
         -----------
-            maxima_extract: one of ['Annual']
+            maxima_extract: one of ['Annual Maxima']
                 How to extract independent maxima subset.
-                Annual: Annual maxima
-            maxima_fit: one of ['GumbelChart']
+            maxima_fit: one of ['Gumbel Chart']
                 How to fit a distribution to the extracted maxima. 
-            bulk_fit: one of ['Empirical', 'BestFit']
+            bulk_fit: one of ['Empirical', 'Parametric']
                 How to fit a distribution to the bulk of the data.
                 Empirical: Use the empirical CDF
-                BestFit: Choose the best fitting distribution 
-            outlier_detect: one of [None, 'RANSAC', 'Huber']
+                Parametric: Choose the best fitting distribution 
+            outlier_detect: one of ['None', 'RANSAC Regression', 'Huber 
+                Regression']
                 Whether to assume outliers when fitting maxima data
                 None: Assume no outliers
-                RANSAC: Use RANSACRegressor to filter outliers
-                Huber: Use HuberRegressor to filter outliers
+                RANSAC Regression: Use RANSACRegressor to filter outliers
+                Huber Regression: Use HuberRegressor to filter outliers
             verbose: bool. Whether to print progress
         '''
         total_steps = 3
-        self.diag_fig = plt.figure(figsize=(16, 8), tight_layout=True)
+        self.diag_fig = plt.figure(figsize=(15, 7), tight_layout=True)
 
         # Fit bulk
         if verbose:
             print(f'Step 1/{total_steps}: Fitting bulk of the data')
         if bulk_fit == 'Empirical':
             self._bulk_empirical_fit()
-        elif bulk_fit == 'BestFit':
+        elif bulk_fit == 'Parametric':
             self._bulk_best_fit(verbose)
         else:
             raise AttributeError(
@@ -129,10 +129,10 @@ class Univariate:
                           maxima_fit=maxima_fit, outlier_detect=outlier_detect)
 
         # Arrange diagnostic plot
-        self.diag_fig.axes[0].change_geometry(2, 4, 1)
-        self.diag_fig.axes[2].change_geometry(2, 4, 2)
-        self.diag_fig.axes[3].change_geometry(2, 4, 5)
-        self.diag_fig.axes[5].change_geometry(2, 4, 6)
+        self.diag_fig.axes[0].change_geometry(2, 4, 3)
+        self.diag_fig.axes[2].change_geometry(2, 4, 4)
+        self.diag_fig.axes[3].change_geometry(2, 4, 7)
+        self.diag_fig.axes[5].change_geometry(2, 4, 8)
         self.diag_fig.axes[4].remove()
         self.diag_fig.axes[1].remove()
 
@@ -221,7 +221,7 @@ class Univariate:
             self.sample_mrp = 1 / self.c_rate / (1 - sample_F)
 
         # Diagnositc plot
-        ax = self.diag_fig.add_subplot(1, 4, (3, 4))
+        ax = self.diag_fig.add_subplot(1, 4, (1, 2))
         mrp_emp = 1 / self.c_rate / (
             1 - util.plotting_position(self.data, method='unbiased'))
         ax.plot(mrp_emp, np.sort(self.data), '.', color=[0.6, 0.6, 0.6],
@@ -278,28 +278,28 @@ class _TailExtrapolation:
         else:
             self.diag_fig = fig_handle
 
-    def fit(self, maxima_extract='Annual', maxima_fit='GumbelChart', 
+    def fit(self, maxima_extract='Annual Maxima', maxima_fit='Gumbel Chart', 
             outlier_detect=None):
         '''Fit EVT tail, MRP ratio, then convert the EVT tail to raw data
         
         Parameters
         ----------
         maxima_extract : str, optional
-            Method to extract independent maxima subset, by default 'Annual'
+            Method to extract independent maxima subset, default 'Annual Maxima'
         maxima_fit : str, optional
-            Method to fit maxima subset, by default 'GumbelChart'
+            Method to fit maxima subset, by default 'Gumbel Chart'
         outlier_detect : str, optional
             Whether to assume outliers in the maxima subset, by default 'None'
-            Options are 'None', 'RANSAC', and 'Huber'
+            Options are 'None', 'RANSAC Regression', and 'Huber Regression'
         '''
         # Extract maxima (sorted, no NaN)
-        if maxima_extract == 'Annual':
+        if maxima_extract == 'Annual Maxima':
             self._extract_annual_maxima()
         else:
             raise AttributeError(
-                'Unsupported maxima extraction method, check method_maxima')
+                f'Unsupported maxima extraction method {maxima_extract}')
 
-        if maxima_fit == 'GumbelChart':
+        if maxima_fit == 'Gumbel Chart':
             self._fit_gumbel_chart(outlier_detect, plot_diagnosis=True)
         else:
             raise AttributeError(
@@ -344,16 +344,16 @@ class _TailExtrapolation:
         x = self.maxima
         F = util.plotting_position(x, method='unbiased')
         y = _gumbel_y(F)
-        if outlier_detect is None:
+        if outlier_detect is None or outlier_detect == 'None':
             mdl = linear_model.LinearRegression().fit(x.reshape(-1, 1), y)
             self.maxima_inlier_mask = np.array(
                 [True] * len(self.maxima))  # Create mask manually
-        elif outlier_detect == 'RANSAC':
+        elif outlier_detect == 'RANSAC Regression':
             mdl = linear_model.RANSACRegressor(
                 random_state=1).fit(x.reshape(-1, 1), y)
             self.maxima_inlier_mask = mdl.inlier_mask_
             mdl = mdl.estimator_
-        elif outlier_detect == 'Huber':
+        elif outlier_detect == 'Huber Regression':
             mdl = linear_model.HuberRegressor(
                 epsilon=1.35).fit(x.reshape(-1, 1), y)
             self.maxima_inlier_mask = np.array(
@@ -378,7 +378,7 @@ class _TailExtrapolation:
             ax.set_ylabel('$-ln(-ln(F))$')
             ax.set_title(f'Gumbel chart ({self.label} tail)')
             ax.grid(True)
-            ax.legend(loc='best')
+            # ax.legend(loc='best')
 
         self.maxima_dist = stats.gumbel_r(loc=-b/k, scale=1/k)
         self.maxima_inlier_mask[self.maxima <
@@ -443,7 +443,7 @@ class _TailExtrapolation:
         def func(t, a, b, c):
             return (a * t + c) ** b
         popt, _ = curve_fit(func, t_emp, mrp_ratio_emp, bounds=(
-            [0, 0, 1], np.inf), sigma=sigma, max_nfev=1e4)
+            [0, 0, 1], np.inf), sigma=sigma, max_nfev=1e5)
 
         # Convert tail MRP
         m_sample_F = self.maxima_dist.cdf(self.sample_coor)
@@ -472,7 +472,7 @@ class _TailExtrapolation:
             ax.set_ylabel('MRP ratio')
             ax.set_title(f'MRP ratio ({self.label} tail)')
             ax.grid(True)
-            ax.legend(loc='lower right')
+            # ax.legend(loc='lower right')
 
             # Maxima to continuous conversion
             ax = self.diag_fig.add_subplot(1, 3, 3, label=self.label)
@@ -494,7 +494,7 @@ class _TailExtrapolation:
             ax.set_ylabel('X')
             ax.set_title(f'Tail extrap. ({self.label} tail)')
             ax.grid(True, which='both')
-            ax.legend(loc='upper left')
+            # ax.legend(loc='upper left')
             # if self.notebook_backend:
             #     plt.close()
 
@@ -508,5 +508,5 @@ if __name__ == '__main__':
         df = pickle.load(f)
     data = df.iloc[:, 0]
     urv = Univariate(data, sample_coor=np.linspace(0, 2*data.max(), 1000))
-    urv.fit(bulk_fit='BestFit')
+    urv.fit(bulk_fit='Parametric')
     urv.plot_diagnosis()

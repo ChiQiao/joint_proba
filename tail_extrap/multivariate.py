@@ -16,15 +16,6 @@ from scipy.optimize import curve_fit, minimize
 from tail_extrap import univariate 
 from tail_extrap import util
 
-font_size = 14
-plt.rc('font', size=font_size)
-plt.rc('axes', titlesize=font_size)
-plt.rc('axes', labelsize=font_size)
-plt.rc('xtick', labelsize=font_size)
-plt.rc('ytick', labelsize=font_size)
-plt.rc('legend', fontsize=font_size)
-plt.rc('figure', titlesize=font_size)
-
 
 class Multivariate:
     ''' Tail extrapolation of multi-variable as a paired time series, resulting
@@ -338,15 +329,13 @@ class Multivariate:
         mrp_pred = ct['df_upper']['mrp_pred'][dist_name]
         para = ct['df_upper']['param'][dist_name]
 
-        plt.figure()
         for y, true, pred, x in zip(fit_coor, mrp_true, mrp_pred, self.condY_x):
             h = plt.plot(true, y, '-', label=x)
             plt.plot(pred, y, '--', color=h[0].get_color())
         plt.xscale('log')
         plt.grid(True)
         plt.xlabel('Mean Return Period (yr)')
-        plt.ylabel(self.x_name)
-        plt.show()
+        plt.ylabel(self.y_name)
     
     def _fit_marginalX(self, **kwargs):
         ''' Fit marginal distribution for x using Univariate object
@@ -494,7 +483,7 @@ class Multivariate:
         ).sort_values(by='chi_square')
 
         # Select candidates based on chi_square
-        df = df[df['chi_square'] < df['chi_square'][0] * 2]
+        df = df[df['chi_square'] < df['chi_square'][0] * 5]
         return df
 
     def _get_condY_para_tail(self, mrp, range_ratio):
@@ -705,7 +694,7 @@ class Multivariate:
 
         # Arrange df_diag
         df_diag = df_diag.sort_values('err')
-        df_diag = df_diag[df_diag['err'] < df_diag['err'][0] * 20]
+        df_diag = df_diag[df_diag['err'] < df_diag['err'][0] * 50]
 
         # Select the best contour
         contour_upper = df_diag['y_top'][0]
@@ -865,16 +854,15 @@ class _CondY:
         '''
         if x_sample is None:
             x_sample = np.linspace(self.x.min(), 1.5 * self.x.max(), 200)
-        plt.figure()
         for idx in range(self.params_raw.shape[1]):
             h = plt.plot(self.x, self.params_raw[:, idx], 'x')
             plt.plot(x_sample, [self._coef_func[idx](x) for x in x_sample],
                      '-', color=h[0].get_color(), label=self.params_name[idx])
         plt.xlabel('x')
+
         plt.title(self.dist_name)
         plt.grid(True)
         plt.legend(loc='best')
-        # plt.show()
 
 
 if __name__ == '__main__':

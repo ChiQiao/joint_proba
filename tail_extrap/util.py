@@ -20,7 +20,7 @@ def best_fit(data, dist_names=None, criteria='chi-square', qq_plot=False, dist_c
         Returns:
         --------
             dist: scipy.stats distribution with the best fit
-            fit_df: DataFrame including columns Distribution', 'chi_square', 
+            fit_df: DataFrame including columns Distribution', 'chi-square', 
                 'r2', and 'param'. Sorted by 'r2' in descending order. 
         Note:
         -----
