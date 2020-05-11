@@ -33,8 +33,6 @@ class Interactive:
     def __init__(self, mv):
         self.mv = mv
 
-        self.uni_fit_button = widgets.Button() # In tab1
-
         self.save_button = SaveFileButton(
             description='Save session as...',
             tooltip='Save current session as a pickle file',
@@ -42,8 +40,8 @@ class Interactive:
             default_type='.pkl'
         )
 
-        self.tab0 = Tab_config(self.mv, self.uni_fit_button)
-        self.tab1 = Tab_univariate(self.mv, self.uni_fit_button)
+        self.tab0 = Tab_config(self.mv)
+        self.tab1 = Tab_univariate(self.mv)
         self.tab2 = Tab_contour(self.mv)
         
         tab = widgets.Tab(children=[
@@ -54,10 +52,10 @@ class Interactive:
         tab.set_title(2, 'Contour construction')
 
         self.save_button.on_click(self.save_session)
-        self.tab0.update_button.on_click(
-            functools.partial(self.tab0_update_clicked, mv=mv))
-        self.tab0.confirm_box.ok_button.on_click(
-            functools.partial(self.tab0_update_confirmed, mv=self.mv))
+        self.tab0.update_button.on_click(self.tab0_update_clicked)
+        self.tab0.confirm_box.ok_button.on_click(self.tab0_update_confirmed)
+        self.tab1.update_button.on_click(self.tab1_update_clicked)
+        self.tab1.confirm_box.ok_button.on_click(self.tab1_update_confirmed)
 
         display(
             widgets.VBox(children=[
@@ -65,8 +63,6 @@ class Interactive:
                 tab,
             ])
         )
-    # TODO: fig resolution, optimize chache, Update tab1 clears tab2, add tail
-    # threshold for marginal x and y
     def save_session(self, change):
         # local function fitting_func in multivariate._CondY.fit cannot be
         #   pickled. As an workaround, mv.condY_cont_dists_bulk is removed and
@@ -79,17 +75,18 @@ class Interactive:
                 pickle.dump(mv_temp, f)
             button_visual(self.save_button, 'Saved')
 
-    def tab0_update_clicked(self, change, mv):
-        if hasattr(mv, 'x_dist'):
+    def tab0_update_clicked(self, change):
+        if hasattr(self.mv, 'x_dist'):
             # Fitting result exists, confirm cleanup
             self.tab0.confirm_box.show()
             self.tab0.update_button.disabled = True
         else:
             # No fitting result exists
-            self.tab0_update_confirmed(change=None, mv=mv)
+            self.tab0_update_confirmed(change=None)
 
-    def tab0_update_confirmed(self, change, mv):
+    def tab0_update_confirmed(self, change):
         # Clean up fitting results
+        mv = self.mv
         mv.condY_x = str_to_condY(self.tab0.condY_text.value)
         for attr in ['x_dist', 'y_dist', 'condY_disc_dists']:
             if hasattr(mv, attr):
@@ -99,17 +96,42 @@ class Interactive:
         # Update tab0 display
         self.tab0.confirm_box.hide()
         self.tab0.update_button.disabled = False
-        self.tab0.refresh_plot(mv)
+        self.tab0.refresh_plot()
         button_visual(self.tab0.update_button, 'Updated')
 
         # Reset tab1 display
-        self.tab1.uni_fit_button.description = 'Start Fitting' 
+        self.tab1.update_button.description = 'Start Fitting' 
         set_widget_visibility(self.tab1.hide_list, 'hidden')
         
         # Update tab2 display
-        self.tab2.mrp_exist_select.options = []
-        self.tab2.mrp_from_new.value = True
+        self.tab2.reset()
     
+    def tab1_update_clicked(self, change):
+        if bool(self.mv.ct):
+            # Contour result exists, confirm cleanup
+            self.tab1.confirm_box.show()
+            self.tab1.update_button.disabled = True
+        else:
+            # No fitting result exists
+            self.tab1_update_confirmed(change=None)
+
+    def tab1_update_confirmed(self, change):
+        '''Operation for the update_button'''
+        if self.tab1.update_button.description == 'Start Fitting': 
+            self.tab1.fit_all()
+        else: 
+            self.tab1.fit_single()
+            button_visual(self.tab1.update_button, 'Updated')
+
+        # Update tab1 display
+        self.tab1.confirm_box.hide()
+        self.tab1.update_button.disabled = False
+        self.tab1.refresh_plot(change=None)
+
+        # Update tab2 display
+        self.tab2.reset()
+
+
     @classmethod
     def from_archive(cls, archive_path):
         with open(archive_path, 'rb') as f:
@@ -150,7 +172,8 @@ class Interactive:
 
 
 class Tab_config:
-    def __init__(self, mv, uni_fit_button):
+    def __init__(self, mv):
+        self.mv = mv
 
         # Update button
 
@@ -192,14 +215,15 @@ class Tab_config:
             self.update_section, self.condY_section, self.data_display,
         ])
 
-        self.refresh_plot(mv)
+        self.refresh_plot()
 
     def cancel_clicked(self, change):
         self.confirm_box.hide()
         self.update_button.disabled = False
 
-    def refresh_plot(self, mv):
+    def refresh_plot(self):
         '''Re-generate the plot in data_display using mv'''
+        mv = self.mv
         self.data_display.clear_output(wait=True)
         with self.data_display:
             plt.figure(figsize=(8, 6))
@@ -221,24 +245,34 @@ class Tab_config:
 
 
 class Tab_univariate:
-    def __init__(self, mv, uni_fit_button):
+    def __init__(self, mv):
+        self.mv = mv
 
         # Fitting section
 
-        self.uni_fit_button = uni_fit_button
+        self.update_button = widgets.Button()
         self.progress_bar = widgets.IntProgress(
             min=0, max=5, 
             layout=widgets.Layout(width='10%', visibility='hidden'))
         self.progress_label = widgets.Label(
             layout=widgets.Layout(visibility='hidden')
         )
+        self.confirm_box = ConfirmDialog(
+            text='Update will erase all the contour results. Continue?'
+        )
 
-        self.fit_section = widgets.HBox(
-            children=[self.uni_fit_button, self.progress_bar, self.progress_label],
+        self.fit_section = widgets.VBox(
+            children=[
+                widgets.HBox(children=[
+                    self.update_button, 
+                    self.progress_bar, self.progress_label
+                ]),
+                self.confirm_box.box
+            ]
         )
         
-        self.uni_fit_button.on_click(
-            functools.partial(self.update, mv=mv))
+        self.confirm_box.hide()
+        self.confirm_box.cancel_button.on_click(self.cancel_clicked)
 
         # Config section
 
@@ -330,11 +364,9 @@ class Tab_univariate:
             layout=layout_section,
         )
 
-        self.update_condY_slider(mv)
-        self.dist_dropdown.observe(
-            functools.partial(self.refresh_plot, mv=mv), names='value')
-        self.condY_slider.observe(
-            functools.partial(self.refresh_plot, mv=mv), names='value')
+        self.update_condY_slider()
+        self.dist_dropdown.observe(self.refresh_plot, names='value')
+        self.condY_slider.observe(self.refresh_plot, names='value')
         self.condY_prev.on_click(self.condY_slider_prev)
         self.condY_next.on_click(self.condY_slider_next)
 
@@ -356,27 +388,35 @@ class Tab_univariate:
             self.condY_next, self.condY_prev, self.condY_slider]
         
         if not hasattr(mv, 'x_dist'):
-            self.uni_fit_button.description = 'Start Fitting'
+            self.update_button.description = 'Start Fitting'
             set_widget_visibility(self.hide_list, 'hidden')
         else:
-            self.uni_fit_button.description = 'Update'
-            self.refresh_plot(change=None, mv=mv)
+            self.update_button.description = 'Update'
+            self.refresh_plot(change=None)
     
-    def update_condY_slider(self, mv):
+    def cancel_clicked(self, change):
+        self.confirm_box.hide()
+        self.update_button.disabled = False
+
+    def update_condY_slider(self):
         '''Update the option for condY_slider'''
         condY_slider_dict = {f'{condY_x:.1f}': idx 
-            for idx, condY_x in enumerate(mv.condY_x)}
+            for idx, condY_x in enumerate(self.mv.condY_x)}
         self.condY_slider.options = condY_slider_dict
 
     def condY_slider_prev(self, change):
+        '''Move condY_slider to the previous value'''
         self.condY_slider.value = max([0, self.condY_slider.value - 1])
 
     def condY_slider_next(self, change):
+        '''Move condY_slider to the next value'''
         self.condY_slider.value = min(
             [len(self.condY_slider.options) - 1, self.condY_slider.value + 1])
     
-    def fit_all(self,mv):
+    def fit_all(self):
         ''' Fit each univariate distribution '''
+        mv = self.mv
+
         self.data_display.clear_output()
         self.progress_bar.layout.visibility = 'visible'
         self.progress_label.layout.visibility = 'visible'
@@ -404,15 +444,16 @@ class Tab_univariate:
         mv.condY_para_bulk_df = df # Save df as condY_cont_dists_bulk will be removed
         self.progress_bar.value += 1
 
-        self.update_condY_slider(mv)
+        # Update display
+        self.update_condY_slider()
         set_widget_visibility(self.hide_list, 'visible')
         self.progress_bar.layout.visibility = 'hidden'
         self.progress_label.layout.visibility = 'hidden'
-        self.uni_fit_button.description = 'Update'
-        self.refresh_plot(change=None, mv=mv)
+        self.update_button.description = 'Update'
         
-    def fit_single(self, mv):
+    def fit_single(self):
         '''Fit a specific univariate distribution defined by dist_dropdown'''
+        mv = self.mv
         self.data_display.clear_output()
 
         # Record current setting
@@ -431,10 +472,11 @@ class Tab_univariate:
             mv._fit_marginalY(**mv.ss[self.dist_dropdown.value])
         else:
             mv._fit_condY_disc(**mv.ss[self.dist_dropdown.value])
-        self.refresh_plot(change=None, mv=mv)
 
-    def refresh_plot(self, change, mv):
+    def refresh_plot(self, change):
         '''Save fitting config and regenerate diagnostic plot'''
+        mv = self.mv
+
         self.maxima_extract_dropdown.value = \
             mv.ss[self.dist_dropdown.value]['maxima_extract']
         self.maxima_fit_dropdown.value = \
@@ -459,14 +501,6 @@ class Tab_univariate:
         with self.data_display:
             display(dist.diag_fig)
             
-    def update(self, change, mv):
-        '''Operation for the uni_fit_button'''
-        if self.uni_fit_button.description == 'Start Fitting': 
-            self.fit_all(mv)
-        else: 
-            self.fit_single(mv)
-            button_visual(self.uni_fit_button, 'Updated')
-    
 
 class Tab_contour:
     def __init__(self, mv):
@@ -624,7 +658,7 @@ class Tab_contour:
         self.hide_list = [self.dist_section, self.plot_section]
         self.cur_mrp = self.get_mrp()
 
-        if not mv.ct:
+        if not bool(mv.ct):
             # No existing contour result
             set_widget_visibility(self.hide_list, 'hidden')
             self.export_button.disabled = True
@@ -633,6 +667,11 @@ class Tab_contour:
             self.update_contour_dropdown(change=None)
             self.update_diag(change=None)
             self.export_button.disabled = False
+
+    def reset(self):
+        '''Reset display to the condition of no contour result'''
+        self.mrp_exist_select.options = []
+        self.mrp_from_new.value = True
 
     def export_contour(self, change):
         '''Export the current contour to a csv file'''
@@ -723,12 +762,14 @@ class Tab_contour:
         ct['tail_diag']['x_sample'] = x_sample
         for dist_name, condY in ct['condY_cont_dists_tail'].items():
             ct['tail_diag'][dist_name] = {}
+            ct['tail_diag'][dist_name]['x_raw'] = condY.x
+            ct['tail_diag'][dist_name]['para_name'] = condY.params_name
+            ct['tail_diag'][dist_name]['para_raw'] = condY.params_raw
+            ct['tail_diag'][dist_name]['para_fit'] = np.empty(
+                shape=(len(x_sample), len(condY.params_name)))
             for idx in range(condY.params_raw.shape[1]):
-                para_name = condY.params_name[idx]
-                ct['tail_diag'][dist_name][para_name] = {}
-                ct['tail_diag'][dist_name][para_name]['para_raw'] = condY.params_raw[:, idx]
-                ct['tail_diag'][dist_name][para_name]['x_raw'] = condY.x
-                ct['tail_diag'][dist_name][para_name]['para_fit'] = [condY._coef_func[idx](x) for x in x_sample]
+                ct['tail_diag'][dist_name]['para_fit'][:, idx] = \
+                    [condY._coef_func[idx](x) for x in x_sample]
         ct.pop('condY_cont_dists_tail')
 
         return ct  
@@ -737,12 +778,12 @@ class Tab_contour:
         x_sample = self.mv.ct[self.cur_mrp]['tail_diag']['x_sample']
         cur_diag = self.mv.ct[self.cur_mrp]['tail_diag'][dist_name]
         y_lb, y_ub = [], []# Lower and upper bounds of raw parameter
-        for para_name, para_res in cur_diag.items():
-            h = plt.plot(para_res['x_raw'], para_res['para_raw'], 'x')
-            plt.plot(x_sample, para_res['para_fit'],
-                    '-', color=h[0].get_color(), label=para_name)
-            y_ub.append(max(para_res['para_raw']))
-            y_lb.append(min(para_res['para_raw']))
+        for idx in range(cur_diag['para_raw'].shape[1]):
+            h = plt.plot(cur_diag['x_raw'], cur_diag['para_raw'][:, idx], 'x')
+            plt.plot(x_sample, cur_diag['para_fit'][:, idx],
+                    '-', color=h[0].get_color(), label=cur_diag['para_name'][idx])
+            y_ub.append(max(cur_diag['para_raw'][:, idx]))
+            y_lb.append(min(cur_diag['para_raw'][:, idx]))
         plt.xlabel(self.mv.x_name)
         plt.ylabel('$f(y|x)$ parameters')
         

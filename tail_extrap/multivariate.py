@@ -830,7 +830,7 @@ class _CondY:
             else:
                 popt, _ = curve_fit(
                     fitting_func, self.x, param_raw, method='trf',
-                    bounds=(coef_lb[param_lb], np.inf), max_nfev=1e5
+                    bounds=(coef_lb[param_lb], np.inf), max_nfev=1e6
                 )
                 coef_func.append(
                     partial(fitting_func, a=popt[0], b=popt[1], c=popt[2]))
